@@ -7,21 +7,30 @@
 #include "hook/vm_structs.h"
 #include "hook/mutex.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define COPY_SUFFIX "$jni2hook"
 
+typedef enum
+{
+    HOOK_MAKE_NATIVE,
+    HOOK_INSERT_CALL
+} hook_kind;
+
 typedef struct
 {
     jmethodID method;
     char *name;
     char *signature;
-    char *copy_name;
+    char *added_name;
     void *native_function;
     bool is_static;
     jmethodID original;
+    uint32_t bytecode_offset;
+    hook_kind kind;
 } hook_entry;
 
 typedef struct
@@ -41,6 +50,7 @@ static int g_flag_state = -1;
 static hooked_class *g_classes = NULL;
 static size_t g_class_count = 0;
 static size_t g_class_cap = 0;
+static uint64_t g_insert_serial = 0;
 
 const char *JNI2Hook_StatusMessage(jni2hook_status status)
 {
@@ -126,11 +136,37 @@ static hooked_class *find_class_of_method(jmethodID method, hook_entry **out_ent
     return NULL;
 }
 
+static bool method_conflicts(jmethodID method, hook_kind kind)
+{
+    for (size_t i = 0; i < g_class_count; i++)
+    {
+        for (size_t j = 0; j < g_classes[i].count; j++)
+        {
+            const hook_entry *entry = &g_classes[i].hooks[j];
+            if (entry->method == method &&
+                (kind == HOOK_MAKE_NATIVE || entry->kind == HOOK_MAKE_NATIVE))
+                return true;
+        }
+    }
+    return false;
+}
+
+static char *make_insert_name(const char *method_name)
+{
+    const size_t capacity = strlen(method_name) + sizeof(COPY_SUFFIX) + 21;
+    char *name = malloc(capacity);
+    if (name == NULL)
+        return NULL;
+
+    snprintf(name, capacity, "%s%s$%" PRIu64, method_name, COPY_SUFFIX, g_insert_serial++);
+    return name;
+}
+
 static void free_entry(hook_entry *entry)
 {
     free(entry->name);
     free(entry->signature);
-    free(entry->copy_name);
+    free(entry->added_name);
     memset(entry, 0, sizeof(*entry));
 }
 
@@ -231,6 +267,29 @@ static void resume_others(suspended_set *set)
     set->count = 0;
 }
 
+static jni2hook_status transform_result(transform_status result)
+{
+    return result == TRANSFORM_ERR_CLASSFILE ? JNI2HOOK_ERR_CLASS_FILE
+                                             : JNI2HOOK_ERR_TRANSFORM;
+}
+
+static int compare_insert_entries(const hook_entry *left, const hook_entry *right)
+{
+    int order = strcmp(left->name, right->name);
+    if (order != 0)
+        return order;
+
+    order = strcmp(left->signature, right->signature);
+    if (order != 0)
+        return order;
+
+    if (left->bytecode_offset > right->bytecode_offset)
+        return -1;
+    if (left->bytecode_offset < right->bytecode_offset)
+        return 1;
+    return 0;
+}
+
 /* Rebuilds the class from the bytes it had before the first hook and applies
    every hook that is currently registered for it. Starting from the original
    every time is what lets hooks be added and removed in any order. */
@@ -264,19 +323,72 @@ static jni2hook_status reapply(hooked_class *target)
         if (status != CLASSFILE_OK)
             return JNI2HOOK_ERR_CLASS_FILE;
 
+        size_t insert_count = 0;
+        for (size_t i = 0; i < target->count; i++)
+        {
+            if (target->hooks[i].kind == HOOK_INSERT_CALL)
+                insert_count++;
+        }
+
+        hook_entry **inserts = NULL;
+        if (insert_count != 0)
+        {
+            inserts = malloc(insert_count * sizeof(*inserts));
+            if (inserts == NULL)
+            {
+                classFile_destroy(cf);
+                return JNI2HOOK_ERR_OUT_OF_MEMORY;
+            }
+        }
+
+        size_t insert_index = 0;
         for (size_t i = 0; i < target->count; i++)
         {
             const hook_entry *entry = &target->hooks[i];
+            if (entry->kind == HOOK_INSERT_CALL)
+            {
+                inserts[insert_index++] = &target->hooks[i];
+                continue;
+            }
+
             classfile_status cause = CLASSFILE_OK;
             const transform_status result = class_transform_make_native(
-                cf, entry->name, entry->signature, entry->copy_name, &cause);
+                cf, entry->name, entry->signature, entry->added_name, &cause);
             if (result != TRANSFORM_OK)
             {
+                free(inserts);
                 classFile_destroy(cf);
-                return result == TRANSFORM_ERR_CLASSFILE ? JNI2HOOK_ERR_CLASS_FILE
-                                                         : JNI2HOOK_ERR_TRANSFORM;
+                return transform_result(result);
             }
         }
+
+        for (size_t i = 1; i < insert_count; i++)
+        {
+            hook_entry *entry = inserts[i];
+            size_t j = i;
+            while (j > 0 && compare_insert_entries(entry, inserts[j - 1]) < 0)
+            {
+                inserts[j] = inserts[j - 1];
+                j--;
+            }
+            inserts[j] = entry;
+        }
+
+        for (size_t i = 0; i < insert_count; i++)
+        {
+            const hook_entry *entry = inserts[i];
+            classfile_status cause = CLASSFILE_OK;
+            const transform_status result = class_transform_insert_call(
+                cf, entry->name, entry->signature, entry->bytecode_offset,
+                entry->added_name, &cause);
+            if (result != TRANSFORM_OK)
+            {
+                free(inserts);
+                classFile_destroy(cf);
+                return transform_result(result);
+            }
+        }
+        free(inserts);
 
         u1 *bytes = NULL;
         size_t size = 0;
@@ -311,8 +423,8 @@ static jni2hook_status reapply(hooked_class *target)
             hook_entry *entry = &target->hooks[i];
 
             JNINativeMethod binding;
-            binding.name = entry->name;
-            binding.signature = entry->signature;
+            binding.name = entry->kind == HOOK_MAKE_NATIVE ? entry->name : entry->added_name;
+            binding.signature = entry->kind == HOOK_MAKE_NATIVE ? entry->signature : "()V";
             binding.fnPtr = entry->native_function;
 
             if ((*env)->RegisterNatives(env, target->klass, &binding, 1) < 0)
@@ -322,15 +434,18 @@ static jni2hook_status reapply(hooked_class *target)
                 break;
             }
 
-            entry->original = entry->is_static
-                                  ? (*env)->GetStaticMethodID(env, target->klass, entry->copy_name, entry->signature)
-                                  : (*env)->GetMethodID(env, target->klass, entry->copy_name, entry->signature);
-
-            if (entry->original == NULL)
+            if (entry->kind == HOOK_MAKE_NATIVE)
             {
-                jvm_clear_exception(env);
-                result = JNI2HOOK_ERR_JNI;
-                break;
+                entry->original = entry->is_static
+                                      ? (*env)->GetStaticMethodID(env, target->klass, entry->added_name, entry->signature)
+                                      : (*env)->GetMethodID(env, target->klass, entry->added_name, entry->signature);
+
+                if (entry->original == NULL)
+                {
+                    jvm_clear_exception(env);
+                    result = JNI2HOOK_ERR_JNI;
+                    break;
+                }
             }
         }
     }
@@ -446,7 +561,11 @@ jni2hook_status JNI2Hook_Attach(JNIEnv **out_env)
     return JNI2HOOK_OK;
 }
 
-jni2hook_status JNI2Hook_Install(jmethodID method, void *native_function, jmethodID *out_original)
+static jni2hook_status install(jmethodID method,
+                               uint32_t bytecode_offset,
+                               void *native_function,
+                               jmethodID *out_original,
+                               hook_kind kind)
 {
     if (!g_initialized)
         return JNI2HOOK_ERR_NOT_INITIALIZED;
@@ -463,16 +582,15 @@ jni2hook_status JNI2Hook_Install(jmethodID method, void *native_function, jmetho
         return JNI2HOOK_ERR_NO_JNI;
     }
 
-    if (find_class_of_method(method, NULL) != NULL)
+    if (method_conflicts(method, kind))
     {
         hook_mutex_unlock(&g_lock);
         return JNI2HOOK_ERR_ALREADY_HOOKED;
     }
 
     jni2hook_status result = JNI2HOOK_OK;
-    char *name = NULL, *signature = NULL, *class_name = NULL, *copy_name = NULL;
+    char *name = NULL, *signature = NULL, *class_name = NULL, *added_name = NULL;
     jclass declaring = NULL;
-    bool added = false;
     hooked_class *target = NULL;
 
     jvmtiError error = (*jvmti)->GetMethodDeclaringClass(jvmti, method, &declaring);
@@ -507,15 +625,21 @@ jni2hook_status JNI2Hook_Install(jmethodID method, void *native_function, jmetho
         goto done;
     }
 
+    if (kind == HOOK_MAKE_NATIVE)
     {
         const size_t length = strlen(name) + sizeof(COPY_SUFFIX);
-        copy_name = malloc(length);
-        if (copy_name == NULL)
-        {
-            result = JNI2HOOK_ERR_OUT_OF_MEMORY;
-            goto done;
-        }
-        snprintf(copy_name, length, "%s%s", name, COPY_SUFFIX);
+        added_name = malloc(length);
+        if (added_name != NULL)
+            snprintf(added_name, length, "%s%s", name, COPY_SUFFIX);
+    }
+    else
+    {
+        added_name = make_insert_name(name);
+    }
+    if (added_name == NULL)
+    {
+        result = JNI2HOOK_ERR_OUT_OF_MEMORY;
+        goto done;
     }
 
     jint modifiers = 0;
@@ -581,13 +705,14 @@ jni2hook_status JNI2Hook_Install(jmethodID method, void *native_function, jmetho
         entry->method = method;
         entry->name = name;
         entry->signature = signature;
-        entry->copy_name = copy_name;
+        entry->added_name = added_name;
         entry->native_function = native_function;
         entry->is_static = (modifiers & JVM_ACC_STATIC) != 0;
+        entry->bytecode_offset = bytecode_offset;
+        entry->kind = kind;
         target->count++;
-        added = true;
 
-        name = signature = copy_name = NULL;
+        name = signature = added_name = NULL;
     }
 
     result = reapply(target);
@@ -595,7 +720,6 @@ jni2hook_status JNI2Hook_Install(jmethodID method, void *native_function, jmetho
     {
         target->count--;
         free_entry(&target->hooks[target->count]);
-        added = false;
         if (target->count == 0)
             drop_class(target);
         else
@@ -603,20 +727,33 @@ jni2hook_status JNI2Hook_Install(jmethodID method, void *native_function, jmetho
         goto done;
     }
 
-    if (out_original != NULL)
+    if (kind == HOOK_MAKE_NATIVE && out_original != NULL)
         *out_original = target->hooks[target->count - 1].original;
 
 done:
-    (void)added;
     free(name);
     free(signature);
-    free(copy_name);
+    free(added_name);
     free(class_name);
     if (declaring != NULL)
         (*env)->DeleteLocalRef(env, declaring);
 
     hook_mutex_unlock(&g_lock);
     return result;
+}
+
+jni2hook_status JNI2Hook_Install(jmethodID method,
+                                 void *native_function,
+                                 jmethodID *out_original)
+{
+    return install(method, 0, native_function, out_original, HOOK_MAKE_NATIVE);
+}
+
+jni2hook_status JNI2Hook_InstallAt(jmethodID method,
+                                   uint32_t bytecode_offset,
+                                   void *native_function)
+{
+    return install(method, bytecode_offset, native_function, NULL, HOOK_INSERT_CALL);
 }
 
 jni2hook_status JNI2Hook_Uninstall(jmethodID method)
@@ -626,20 +763,26 @@ jni2hook_status JNI2Hook_Uninstall(jmethodID method)
 
     hook_mutex_lock(&g_lock);
 
-    hook_entry *entry = NULL;
-    hooked_class *target = find_class_of_method(method, &entry);
+    hooked_class *target = find_class_of_method(method, NULL);
     if (target == NULL)
     {
         hook_mutex_unlock(&g_lock);
         return JNI2HOOK_ERR_NOT_HOOKED;
     }
 
-    const size_t index = (size_t)(entry - target->hooks);
-    free_entry(entry);
-    const size_t tail = target->count - index - 1;
-    if (tail != 0)
-        memmove(entry, entry + 1, tail * sizeof(*entry));
-    target->count--;
+    size_t kept = 0;
+    for (size_t i = 0; i < target->count; i++)
+    {
+        if (target->hooks[i].method == method)
+        {
+            free_entry(&target->hooks[i]);
+            continue;
+        }
+        if (kept != i)
+            target->hooks[kept] = target->hooks[i];
+        kept++;
+    }
+    target->count = kept;
 
     const jni2hook_status result = reapply(target);
 
@@ -682,6 +825,7 @@ void JNI2Hook_Shutdown(void)
     g_classes = NULL;
     g_class_count = 0;
     g_class_cap = 0;
+    g_insert_serial = 0;
 
     class_cache_clear();
     class_cache_stop();

@@ -1,6 +1,8 @@
 #ifndef JNI2HOOK_H
 #define JNI2HOOK_H
 
+#include <stdint.h>
+
 #include <jni.h>
 #include <jvmti.h>
 
@@ -65,7 +67,18 @@ jni2hook_status JNI2Hook_Attach(JNIEnv **out_env);
  * the caller. */
 jni2hook_status JNI2Hook_Install(jmethodID method, void *native_function, jmethodID *out_original);
 
-/* Puts the body back and drops the copy. Other hooks on the same class stay. */
+/* Inserts a call to native_function at bytecode_offset while leaving the
+   method body in place. The offset names an instruction in the original class
+   body; installing another call in the same method does not shift it.
+
+   native_function has the signature (JNIEnv *, jobject) for an instance
+   method and (JNIEnv *, jclass) for a static method, and returns void. */
+jni2hook_status JNI2Hook_InstallAt(jmethodID method,
+                                  uint32_t bytecode_offset,
+                                  void *native_function);
+
+/* Puts the body back and drops any copies or inserted calls for method. Other
+   hooks on the same class stay. */
 jni2hook_status JNI2Hook_Uninstall(jmethodID method);
 
 int  JNI2Hook_IsInstalled(jmethodID method);

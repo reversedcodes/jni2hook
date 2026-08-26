@@ -314,8 +314,9 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s <in.class> <method> <descriptor> <copy-name> <out.class> [--restore]\n"
                 "       %s <in.class> --all <copy-suffix> <out.class>\n"
-                "       %s <in.class> --insert <name:descriptor@offset> <hook-name> <out.class>\n",
-                argv[0], argv[0], argv[0]);
+                "       %s <in.class> --insert <name:descriptor@offset> <hook-name> <out.class>\n"
+                "       %s <in.class> --insert-all <unused> <out.class>\n",
+                argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
 

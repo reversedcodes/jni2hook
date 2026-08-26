@@ -10,8 +10,17 @@ public class HookRuntimeTest {
     static native int unhookCompute(Class<?> target);
     static native int unhookGreet(Class<?> target);
     static native int unhookLocked(Class<?> target);
+    static native int hookInsertFirst(Class<?> target);
+    static native int hookInsertSecond(Class<?> target);
+    static native int hookInsertStatic(Class<?> target);
+    static native int unhookInsert(Class<?> target);
+    static native int unhookInsertStatic(Class<?> target);
     static native int calls();
     static native void resetCalls();
+    static native int insertFirstCalls();
+    static native int insertSecondCalls();
+    static native int insertStaticCalls();
+    static native void resetInsertCalls();
     static native void teardown();
 
     public int compute(int a, int b) {
@@ -24,6 +33,15 @@ public class HookRuntimeTest {
 
     public synchronized int locked(int x) {
         return x * 2;
+    }
+
+    public int insertTarget() {
+        int value = 1;
+        return value;
+    }
+
+    public static int staticInsertTarget() {
+        return 9;
     }
 
     static int failures = 0;
@@ -78,6 +96,50 @@ public class HookRuntimeTest {
 
         check("uninstall locked", unhookLocked(HookRuntimeTest.class) == 0);
         check("locked back to original", o.locked(21), 42);
+
+        check("install call at original offset 0", hookInsertFirst(HookRuntimeTest.class) == 0);
+        resetInsertCalls();
+        check("body continues after inserted call", o.insertTarget(), 1);
+        check("first inserted call ran", insertFirstCalls(), 1);
+        check("second inserted call not installed yet", insertSecondCalls(), 0);
+
+        check("install call at original offset 2", hookInsertSecond(HookRuntimeTest.class) == 0);
+        resetInsertCalls();
+        check("body survives two inserted calls", o.insertTarget(), 1);
+        check("first inserted call survives reapply", insertFirstCalls(), 1);
+        check("second inserted call ran", insertSecondCalls(), 1);
+
+        check("install replacement beside inserted calls", hookCompute(HookRuntimeTest.class) == 0);
+        resetCalls();
+        resetInsertCalls();
+        check("replacement works beside inserted calls", o.compute(2, 3), 50);
+        check("inserted calls work beside replacement", o.insertTarget(), 1);
+        check("replacement detour ran beside inserted calls", calls(), 1);
+        check("both inserted calls ran beside replacement",
+                insertFirstCalls() == 1 && insertSecondCalls() == 1);
+        check("uninstall replacement beside inserted calls", unhookCompute(HookRuntimeTest.class) == 0);
+        resetInsertCalls();
+        check("inserted calls survive replacement uninstall", o.insertTarget(), 1);
+        check("both inserted calls survived replacement uninstall",
+                insertFirstCalls() == 1 && insertSecondCalls() == 1);
+
+        check("install static inserted call", hookInsertStatic(HookRuntimeTest.class) == 0);
+        resetInsertCalls();
+        check("static body continues after inserted call", staticInsertTarget(), 9);
+        check("static inserted call ran", insertStaticCalls(), 1);
+
+        check("uninstall removes both calls for the method", unhookInsert(HookRuntimeTest.class) == 0);
+        resetInsertCalls();
+        check("instance body remains original after uninstall", o.insertTarget(), 1);
+        check("first inserted call removed", insertFirstCalls(), 0);
+        check("second inserted call removed", insertSecondCalls(), 0);
+        check("static inserted call survives unrelated uninstall", staticInsertTarget(), 9);
+        check("static inserted call still ran", insertStaticCalls(), 1);
+
+        check("uninstall static inserted call", unhookInsertStatic(HookRuntimeTest.class) == 0);
+        resetInsertCalls();
+        check("static body remains original after uninstall", staticInsertTarget(), 9);
+        check("static inserted call removed", insertStaticCalls(), 0);
 
         check("reinstall after full uninstall", hookCompute(HookRuntimeTest.class) == 0);
         check("compute hooked again", o.compute(2, 3), 50);
