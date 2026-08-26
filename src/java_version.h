@@ -1,0 +1,36 @@
+#ifndef JNI2HOOK_JAVA_VERSION_H
+#define JNI2HOOK_JAVA_VERSION_H
+
+#define JAVA_CLASSFILE_MAGIC 0xCAFEBABE
+#define JAVA_MIN_SUPPORTED_VERSION 45
+#define JAVA_PREVIEW_MINOR_VERSION 65535
+
+#define JAVA_1_5_VERSION 49
+#define JAVA_6_VERSION 50
+#define JAVA_7_VERSION 51
+#define JAVA_8_VERSION 52
+#define JAVA_9_VERSION 53
+#define JAVA_10_VERSION 54
+#define JAVA_11_VERSION 55
+#define JAVA_12_VERSION 56
+#define JAVA_13_VERSION 57
+#define JAVA_14_VERSION 58
+#define JAVA_15_VERSION 59
+#define JAVA_16_VERSION 60
+#define JAVA_17_VERSION 61
+#define JAVA_18_VERSION 62
+#define JAVA_19_VERSION 63
+#define JAVA_20_VERSION 64
+#define JAVA_21_VERSION 65
+#define JAVA_22_VERSION 66
+#define JAVA_23_VERSION 67
+#define JAVA_24_VERSION 68
+#define JAVA_25_VERSION 69
+#define JAVA_26_VERSION 70
+#define JAVA_27_VERSION 71
+#define JAVA_28_VERSION 72
+
+/* Class file major version -> the JDK release that introduced it. */
+#define JDK_VERSION_OF(major) (7 + ((major) - JAVA_7_VERSION))
+
+#endif
