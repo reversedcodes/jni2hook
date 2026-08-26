@@ -57,7 +57,9 @@ transform_status class_transform_make_native(ClassFile *cf,
  * The hook method is declared native so the caller can bind it with
  * RegisterNatives. It takes no arguments; reaching the locals of the method it
  * sits in is not part of this. The offset has to name an instruction boundary,
- * which is what a bytecode signature scan yields anyway. */
+ * which is what a bytecode signature scan yields anyway. In <init>, an offset
+ * before the initializing this()/super() invokespecial is moved directly after
+ * that call, where this is a regular initialized reference. */
 transform_status class_transform_insert_call(ClassFile *cf,
                                              const char *name,
                                              const char *descriptor,

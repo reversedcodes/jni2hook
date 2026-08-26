@@ -2,6 +2,7 @@
 
 #include "class_file_parser.h"
 #include "class_transform.h"
+#include "hook/bytecode_scan.h"
 #include "hook/class_cache.h"
 #include "hook/jvm.h"
 #include "hook/vm_structs.h"
@@ -13,6 +14,7 @@
 #include <string.h>
 
 #define COPY_SUFFIX "$jni2hook"
+#define INSERT_PREFIX "$jni2hook$"
 
 typedef enum
 {
@@ -82,6 +84,10 @@ const char *JNI2Hook_StatusMessage(jni2hook_status status)
         return "this method is already hooked";
     case JNI2HOOK_ERR_NOT_HOOKED:
         return "this method is not hooked";
+    case JNI2HOOK_ERR_INVALID_PATTERN:
+        return "the bytecode pattern is invalid";
+    case JNI2HOOK_ERR_NOT_FOUND:
+        return "no method matched the bytecode pattern";
     case JNI2HOOK_ERR_OUT_OF_MEMORY:
         return "out of memory";
     }
@@ -151,14 +157,14 @@ static bool method_conflicts(jmethodID method, hook_kind kind)
     return false;
 }
 
-static char *make_insert_name(const char *method_name)
+static char *make_insert_name(void)
 {
-    const size_t capacity = strlen(method_name) + sizeof(COPY_SUFFIX) + 21;
+    const size_t capacity = sizeof(INSERT_PREFIX) + 20;
     char *name = malloc(capacity);
     if (name == NULL)
         return NULL;
 
-    snprintf(name, capacity, "%s%s$%" PRIu64, method_name, COPY_SUFFIX, g_insert_serial++);
+    snprintf(name, capacity, "%s%" PRIu64, INSERT_PREFIX, g_insert_serial++);
     return name;
 }
 
@@ -504,6 +510,7 @@ jni2hook_status JNI2Hook_Init(JavaVM *vm)
     wanted.can_retransform_any_class = available.can_retransform_any_class;
     wanted.can_generate_all_class_hook_events =
         available.can_generate_all_class_hook_events;
+    wanted.can_get_bytecodes = available.can_get_bytecodes;
     wanted.can_suspend = available.can_suspend;
 
     const jvmtiError error = (*jvmti)->AddCapabilities(jvmti, &wanted);
@@ -634,7 +641,7 @@ static jni2hook_status install(jmethodID method,
     }
     else
     {
-        added_name = make_insert_name(name);
+        added_name = make_insert_name();
     }
     if (added_name == NULL)
     {
@@ -754,6 +761,66 @@ jni2hook_status JNI2Hook_InstallAt(jmethodID method,
                                    void *native_function)
 {
     return install(method, bytecode_offset, native_function, NULL, HOOK_INSERT_CALL);
+}
+
+static jni2hook_status find_method(jclass target,
+                                   const char *pattern,
+                                   jmethodID *out_method,
+                                   uint32_t *out_bytecode_offset,
+                                   jni2hook_search_stats *out_stats)
+{
+    if (!g_initialized)
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
+    if (pattern == NULL || out_method == NULL || out_bytecode_offset == NULL)
+        return JNI2HOOK_ERR_INVALID_PATTERN;
+
+    hook_mutex_lock(&g_lock);
+
+    JNIEnv *env = jvm_env();
+    jvmtiEnv *jvmti = jvm_jvmti();
+    jni2hook_status result = JNI2HOOK_OK;
+    if (env == NULL)
+    {
+        result = JNI2HOOK_ERR_NO_JNI;
+    }
+    else if (jvmti == NULL)
+    {
+        result = JNI2HOOK_ERR_NO_JVMTI;
+    }
+    else
+    {
+        *out_method = NULL;
+        *out_bytecode_offset = 0;
+        jvmtiError error = JVMTI_ERROR_NONE;
+        result = target == NULL
+                     ? bytecode_scan_find(env, jvmti, pattern, out_method,
+                                          out_bytecode_offset, out_stats, &error)
+                     : bytecode_scan_find_in_class(jvmti, target, pattern, out_method,
+                                                   out_bytecode_offset, &error);
+        if (result == JNI2HOOK_ERR_JVMTI)
+            g_last_error = error;
+    }
+
+    hook_mutex_unlock(&g_lock);
+    return result;
+}
+
+jni2hook_status JNI2Hook_FindMethod(const char *pattern,
+                                    jmethodID *out_method,
+                                    uint32_t *out_bytecode_offset,
+                                    jni2hook_search_stats *out_stats)
+{
+    return find_method(NULL, pattern, out_method, out_bytecode_offset, out_stats);
+}
+
+jni2hook_status JNI2Hook_FindMethodInClass(jclass target,
+                                           const char *pattern,
+                                           jmethodID *out_method,
+                                           uint32_t *out_bytecode_offset)
+{
+    if (target == NULL)
+        return JNI2HOOK_ERR_INVALID_PATTERN;
+    return find_method(target, pattern, out_method, out_bytecode_offset, NULL);
 }
 
 jni2hook_status JNI2Hook_Uninstall(jmethodID method)

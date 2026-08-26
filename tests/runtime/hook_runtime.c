@@ -12,6 +12,8 @@ static int       g_calls         = 0;
 static int       g_insert_first  = 0;
 static int       g_insert_second = 0;
 static int       g_insert_static = 0;
+static int       g_ctor_direct   = 0;
+static int       g_ctor_delegate = 0;
 
 static jint JNICALL detour_compute(JNIEnv *env, jobject self, jint a, jint b)
 {
@@ -60,6 +62,20 @@ static void JNICALL detour_insert_static(JNIEnv *env, jclass klass)
     (void)env;
     (void)klass;
     g_insert_static++;
+}
+
+static void JNICALL detour_ctor_direct(JNIEnv *env, jobject self)
+{
+    (void)env;
+    (void)self;
+    g_ctor_direct++;
+}
+
+static void JNICALL detour_ctor_delegate(JNIEnv *env, jobject self)
+{
+    (void)env;
+    (void)self;
+    g_ctor_delegate++;
 }
 
 JNIEXPORT jint JNICALL Java_HookRuntimeTest_setup(JNIEnv *env, jclass unused)
@@ -224,6 +240,35 @@ JNIEXPORT jint JNICALL Java_HookRuntimeTest_unhookInsertStatic(JNIEnv *env, jcla
     return uninstall(env, target, "staticInsertTarget", "()I", true);
 }
 
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_hookCtorDirect(JNIEnv *env, jclass unused, jclass target)
+{
+    (void)unused;
+    return install_at(env, target, "<init>", "(I)V", false, 0,
+                      (void *)detour_ctor_direct);
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_hookCtorDelegate(JNIEnv *env, jclass unused,
+                                                             jclass target)
+{
+    (void)unused;
+    return install_at(env, target, "<init>", "()V", false, 0,
+                      (void *)detour_ctor_delegate);
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_unhookCtorDirect(JNIEnv *env, jclass unused,
+                                                             jclass target)
+{
+    (void)unused;
+    return uninstall(env, target, "<init>", "(I)V", false);
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_unhookCtorDelegate(JNIEnv *env, jclass unused,
+                                                               jclass target)
+{
+    (void)unused;
+    return uninstall(env, target, "<init>", "()V", false);
+}
+
 JNIEXPORT jint JNICALL Java_HookRuntimeTest_calls(JNIEnv *env, jclass unused)
 {
     (void)env; (void)unused;
@@ -264,6 +309,83 @@ JNIEXPORT void JNICALL Java_HookRuntimeTest_resetInsertCalls(JNIEnv *env, jclass
     g_insert_first = 0;
     g_insert_second = 0;
     g_insert_static = 0;
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_ctorDirectCalls(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    return g_ctor_direct;
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_ctorDelegateCalls(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    return g_ctor_delegate;
+}
+
+JNIEXPORT void JNICALL Java_HookRuntimeTest_resetCtorCalls(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    g_ctor_direct = 0;
+    g_ctor_delegate = 0;
+}
+
+static jint scan_signature(JNIEnv *env, jclass target, bool all_classes)
+{
+    static const char *pattern = "1B 06 78 08 82 10 ?? 60 10 07 68 AC";
+    jmethodID expected = (*env)->GetMethodID(env, target, "signatureTarget", "(I)I");
+    if (expected == NULL)
+    {
+        (*env)->ExceptionClear(env);
+        return -1;
+    }
+
+    jmethodID found = NULL;
+    uint32_t offset = UINT32_MAX;
+    jni2hook_search_stats stats;
+    memset(&stats, 0, sizeof(stats));
+    const jni2hook_status status =
+        all_classes ? JNI2Hook_FindMethod(pattern, &found, &offset, &stats)
+                    : JNI2Hook_FindMethodInClass(target, pattern, &found, &offset);
+    if (status != JNI2HOOK_OK)
+    {
+        fprintf(stderr, "  bytecode scan: %s (jvmti %d)\n",
+                JNI2Hook_StatusMessage(status), (int)JNI2Hook_LastJvmtiError());
+        return (jint)status;
+    }
+    if (found != expected || offset != 0)
+        return -2;
+    if (all_classes && (stats.classes_total == 0 || stats.methods_scanned == 0))
+        return -3;
+    return 0;
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_scanInClass(JNIEnv *env, jclass unused, jclass target)
+{
+    (void)unused;
+    return scan_signature(env, target, false);
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_scanGlobally(JNIEnv *env, jclass unused, jclass target)
+{
+    (void)unused;
+    return scan_signature(env, target, true);
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_rejectInvalidPattern(JNIEnv *env, jclass unused,
+                                                                 jclass target)
+{
+    (void)env;
+    (void)unused;
+    jmethodID found = NULL;
+    uint32_t offset = 0;
+    return JNI2Hook_FindMethodInClass(target, "1B nope AC", &found, &offset) ==
+                   JNI2HOOK_ERR_INVALID_PATTERN
+               ? 0
+               : -1;
 }
 
 JNIEXPORT void JNICALL Java_HookRuntimeTest_teardown(JNIEnv *env, jclass unused)

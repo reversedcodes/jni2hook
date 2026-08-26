@@ -38,17 +38,57 @@ static bool is_initializer(const ClassFile *cf, const member_info *method)
            classFile_utf8_equals(cf, method->name_index, "<clinit>");
 }
 
+static bool is_instance_initializer(const ClassFile *cf, const member_info *method)
+{
+    return classFile_utf8_equals(cf, method->name_index, "<init>");
+}
+
+static bool initializes_this(const ClassFile *cf, const instruction *node)
+{
+    if (node->opcode != JVM_OPC_invokespecial || node->kind != OPERAND_CP_INDEX)
+        return false;
+
+    const cp_info *methodref = constant_pool_at(&cf->constant_pool, node->u.cp.index);
+    if (methodref == NULL || methodref->tag != JVM_CONSTANT_Methodref)
+        return false;
+    if (methodref->u.ref.class_index != cf->this_class &&
+        methodref->u.ref.class_index != cf->super_class)
+        return false;
+
+    const cp_info *name_and_type =
+        constant_pool_at(&cf->constant_pool, methodref->u.ref.nat_index);
+    return name_and_type != NULL && name_and_type->tag == JVM_CONSTANT_NameAndType &&
+           constant_pool_utf8_equals(&cf->constant_pool,
+                                     name_and_type->u.nat.name_index, "<init>");
+}
+
+static bool initialized_offset(const ClassFile *cf,
+                               const instruction_list *instructions,
+                               u4 *out_offset)
+{
+    for (u4 i = 0; i < instructions->count; i++)
+    {
+        const instruction *node = &instructions->items[i];
+        if (initializes_this(cf, node))
+        {
+            *out_offset = node->offset + instruction_length_at(node, node->offset);
+            return true;
+        }
+    }
+    return false;
+}
+
 static u2 copy_flags(u2 original_flags)
 {
-   /* Private plus static or final is the only shape RedefineClasses accepts for
-      a method that was not in the class before. On top of that the copy has to
-      keep every flag that describes the body it inherits: SYNCHRONIZED or the
-      moved code loses its monitor, BRIDGE or the verifier stops being lenient
-      about the covariant return of a javac bridge, STRICT for the float
-      semantics of old class files, VARARGS and SYNTHETIC for bookkeeping. */
-   const u2 inherited = (u2)(JVM_ACC_STATIC | JVM_ACC_SYNCHRONIZED | JVM_ACC_BRIDGE |
-                             JVM_ACC_VARARGS | JVM_ACC_STRICT | JVM_ACC_SYNTHETIC);
-   return (u2)(JVM_ACC_PRIVATE | JVM_ACC_FINAL | (original_flags & inherited));
+    /* Private plus static or final is the only shape RedefineClasses accepts for
+       a method that was not in the class before. On top of that the copy has to
+       keep every flag that describes the body it inherits: SYNCHRONIZED or the
+       moved code loses its monitor, BRIDGE or the verifier stops being lenient
+       about the covariant return of a javac bridge, STRICT for the float
+       semantics of old class files, VARARGS and SYNTHETIC for bookkeeping. */
+    const u2 inherited = (u2)(JVM_ACC_STATIC | JVM_ACC_SYNCHRONIZED | JVM_ACC_BRIDGE |
+                              JVM_ACC_VARARGS | JVM_ACC_STRICT | JVM_ACC_SYNTHETIC);
+    return (u2)(JVM_ACC_PRIVATE | JVM_ACC_FINAL | (original_flags & inherited));
 }
 
 static transform_status fail(classfile_status cause, classfile_status *out_cause)
@@ -189,7 +229,8 @@ transform_status class_transform_insert_call(ClassFile *cf,
         return TRANSFORM_ERR_METHOD_NOT_FOUND;
 
     const u2 index = (u2)(found - cf->methods.items);
-    if (is_initializer(cf, &cf->methods.items[index]))
+    const bool is_constructor = is_instance_initializer(cf, &cf->methods.items[index]);
+    if (classFile_utf8_equals(cf, cf->methods.items[index].name_index, "<clinit>"))
         return TRANSFORM_ERR_INITIALIZER;
     if ((cf->methods.items[index].access_flags & JVM_ACC_ABSTRACT) != 0)
         return TRANSFORM_ERR_ABSTRACT;
@@ -229,6 +270,18 @@ transform_status class_transform_insert_call(ClassFile *cf,
     if (status != CLASSFILE_OK)
         return fail(status, out_cause);
 
+    if (is_constructor)
+    {
+        u4 safe_offset = 0;
+        if (!initialized_offset(cf, &editor.instructions, &safe_offset))
+        {
+            code_editor_free(&editor);
+            return TRANSFORM_ERR_INITIALIZER;
+        }
+        if (at_offset < safe_offset)
+            at_offset = safe_offset;
+    }
+
     instruction nodes[2];
     memset(nodes, 0, sizeof(nodes));
     u4 count = 0;
@@ -236,12 +289,12 @@ transform_status class_transform_insert_call(ClassFile *cf,
     if (!is_static)
     {
         nodes[count].opcode = JVM_OPC_aload_0;
-        nodes[count].kind   = OPERAND_NONE;
+        nodes[count].kind = OPERAND_NONE;
         count++;
     }
-    nodes[count].opcode      = is_static ? JVM_OPC_invokestatic : JVM_OPC_invokespecial;
-    nodes[count].kind        = OPERAND_CP_INDEX;
-    nodes[count].u.cp.index  = methodref;
+    nodes[count].opcode = is_static ? JVM_OPC_invokestatic : JVM_OPC_invokespecial;
+    nodes[count].kind = OPERAND_CP_INDEX;
+    nodes[count].u.cp.index = methodref;
     count++;
 
     status = code_editor_insert(&editor, at_offset, nodes, count, 1);
@@ -264,7 +317,7 @@ transform_status class_transform_insert_call(ClassFile *cf,
 
     hook->access_flags = (u2)(JVM_ACC_PRIVATE | JVM_ACC_FINAL | JVM_ACC_NATIVE |
                               (is_static ? JVM_ACC_STATIC : 0));
-    hook->name_index       = hook_name_index;
+    hook->name_index = hook_name_index;
     hook->descriptor_index = void_index;
 
     return TRANSFORM_OK;

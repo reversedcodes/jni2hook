@@ -41,7 +41,12 @@ static void *resolve(const char *symbol)
 {
 #if defined(_WIN32)
     HMODULE jvm = GetModuleHandleA("jvm.dll");
-    return jvm != NULL ? (void *)GetProcAddress(jvm, symbol) : NULL;
+    if (jvm == NULL)
+        return NULL;
+    FARPROC address = GetProcAddress(jvm, symbol);
+    void *result = NULL;
+    memcpy(&result, &address, sizeof(result));
+    return result;
 #else
     void *found = dlsym(RTLD_DEFAULT, symbol);
     if (found != NULL)

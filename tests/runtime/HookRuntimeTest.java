@@ -15,12 +15,22 @@ public class HookRuntimeTest {
     static native int hookInsertStatic(Class<?> target);
     static native int unhookInsert(Class<?> target);
     static native int unhookInsertStatic(Class<?> target);
+    static native int hookCtorDirect(Class<?> target);
+    static native int hookCtorDelegate(Class<?> target);
+    static native int unhookCtorDirect(Class<?> target);
+    static native int unhookCtorDelegate(Class<?> target);
     static native int calls();
     static native void resetCalls();
     static native int insertFirstCalls();
     static native int insertSecondCalls();
     static native int insertStaticCalls();
     static native void resetInsertCalls();
+    static native int ctorDirectCalls();
+    static native int ctorDelegateCalls();
+    static native void resetCtorCalls();
+    static native int scanInClass(Class<?> target);
+    static native int scanGlobally(Class<?> target);
+    static native int rejectInvalidPattern(Class<?> target);
     static native void teardown();
 
     public int compute(int a, int b) {
@@ -42,6 +52,22 @@ public class HookRuntimeTest {
 
     public static int staticInsertTarget() {
         return 9;
+    }
+
+    public int signatureTarget(int value) {
+        return (((value << 3) ^ 5) + 17) * 7;
+    }
+
+    public static class ConstructorTarget {
+        final int value;
+
+        public ConstructorTarget() {
+            this(7);
+        }
+
+        public ConstructorTarget(int value) {
+            this.value = value;
+        }
     }
 
     static int failures = 0;
@@ -67,6 +93,10 @@ public class HookRuntimeTest {
         check("before any hook: locked(21)", o.locked(21), 42);
 
         check("JNI2Hook_Init", setup() == 0);
+
+        check("find bytecode signature in class", scanInClass(HookRuntimeTest.class) == 0);
+        check("find bytecode signature across loaded classes", scanGlobally(HookRuntimeTest.class) == 0);
+        check("reject malformed bytecode signature", rejectInvalidPattern(HookRuntimeTest.class) == 0);
 
         check("install compute", hookCompute(HookRuntimeTest.class) == 0);
         resetCalls();
@@ -140,6 +170,27 @@ public class HookRuntimeTest {
         resetInsertCalls();
         check("static body remains original after uninstall", staticInsertTarget(), 9);
         check("static inserted call removed", insertStaticCalls(), 0);
+
+        check("install direct-super constructor hook",
+                hookCtorDirect(ConstructorTarget.class) == 0);
+        resetCtorCalls();
+        check("direct-super constructor body continues", new ConstructorTarget(11).value, 11);
+        check("direct-super constructor hook ran", ctorDirectCalls(), 1);
+
+        check("install delegating-this constructor hook",
+                hookCtorDelegate(ConstructorTarget.class) == 0);
+        resetCtorCalls();
+        check("delegating constructor body continues", new ConstructorTarget().value, 7);
+        check("delegated constructor hook ran", ctorDirectCalls(), 1);
+        check("delegating constructor hook ran", ctorDelegateCalls(), 1);
+
+        check("uninstall direct-super constructor hook",
+                unhookCtorDirect(ConstructorTarget.class) == 0);
+        check("uninstall delegating-this constructor hook",
+                unhookCtorDelegate(ConstructorTarget.class) == 0);
+        resetCtorCalls();
+        check("constructors remain original after uninstall", new ConstructorTarget().value, 7);
+        check("constructor hooks removed", ctorDirectCalls() == 0 && ctorDelegateCalls() == 0);
 
         check("reinstall after full uninstall", hookCompute(HookRuntimeTest.class) == 0);
         check("compute hooked again", o.compute(2, 3), 50);

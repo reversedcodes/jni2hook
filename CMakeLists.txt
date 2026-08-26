@@ -7,9 +7,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_library(jni2hook STATIC
     src/byte_stream.c
+    src/class_layout.c
     src/class_file_parser.c
     src/class_transform.c
     src/jni2hook.c
+    src/hook/bytecode_scan.c
     src/hook/class_cache.c
     src/hook/jvm.c
     src/hook/vm_structs.c
@@ -60,4 +62,13 @@ if(JNI2HOOK_BUILD_TESTS)
     add_library(j2h_runtime_test SHARED tests/runtime/hook_runtime.c)
     target_link_libraries(j2h_runtime_test PRIVATE jni2hook)
     target_include_directories(j2h_runtime_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+    if(WIN32)
+        add_library(j2h_fake_jvm SHARED tests/windows/fake_jvm.c)
+        set_target_properties(j2h_fake_jvm PROPERTIES OUTPUT_NAME jvm PREFIX "")
+        add_executable(j2h_vm_structs_windows tests/windows/vm_structs_windows.c)
+        target_link_libraries(j2h_vm_structs_windows PRIVATE jni2hook)
+        target_include_directories(j2h_vm_structs_windows PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        add_dependencies(j2h_vm_structs_windows j2h_fake_jvm)
+    endif()
 endif()
