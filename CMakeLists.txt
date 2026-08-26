@@ -17,8 +17,11 @@ add_library(jni2hook STATIC
     src/visitors/attribute_info.c
     src/visitors/class_file.c
     src/visitors/code_attribute.c
+    src/visitors/code_editor.c
     src/visitors/cp_info.c
+    src/visitors/instruction.c
     src/visitors/member_info.c
+    src/visitors/stack_map_table.c
     src/visitors/visitor.c
 )
 

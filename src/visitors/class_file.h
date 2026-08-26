@@ -46,5 +46,10 @@ attribute_info *classFile_find_attribute(ClassFile *cf, const char *name);
 
 /* Interns a Utf8 entry, reusing an identical one when the pool already has it. */
 classfile_status classFile_intern_utf8(ClassFile *cf, const char *text, u2 *index);
+classfile_status classFile_intern_class(ClassFile *cf, const char *name, u2 *index);
+classfile_status classFile_intern_name_and_type(ClassFile *cf, const char *name,
+                                                const char *descriptor, u2 *index);
+classfile_status classFile_intern_methodref(ClassFile *cf, u2 class_index, const char *name,
+                                            const char *descriptor, u2 *index);
 
 #endif

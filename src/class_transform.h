@@ -30,7 +30,8 @@ typedef enum
    TRANSFORM_ERR_INTERFACE,
    TRANSFORM_ERR_NO_CODE,
    TRANSFORM_ERR_NAME_IN_USE,
-   TRANSFORM_ERR_CLASSFILE
+   TRANSFORM_ERR_CLASSFILE,
+   TRANSFORM_ERR_BAD_OFFSET
 } transform_status;
 
 const char *transform_status_message(transform_status status);
@@ -42,6 +43,26 @@ transform_status class_transform_make_native(ClassFile *cf,
                                              const char *name,
                                              const char *descriptor,
                                              const char *copy_name,
+                                             classfile_status *out_cause);
+
+/* Inserts a call to a fresh native method at a bytecode offset, leaving the
+   body itself in place. This is the shape a hook takes when it has to observe a
+   point inside a method rather than replace it:
+ *
+ *     public int compute(int a) {
+ *         this.<hook>();          <- inserted at the requested offset
+ *         <original body>
+ *     }
+ *
+ * The hook method is declared native so the caller can bind it with
+ * RegisterNatives. It takes no arguments; reaching the locals of the method it
+ * sits in is not part of this. The offset has to name an instruction boundary,
+ * which is what a bytecode signature scan yields anyway. */
+transform_status class_transform_insert_call(ClassFile *cf,
+                                             const char *name,
+                                             const char *descriptor,
+                                             u4 at_offset,
+                                             const char *hook_name,
                                              classfile_status *out_cause);
 
 /* Undoes the rewrite: moves the body back from the copy and drops it again. */

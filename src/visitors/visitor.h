@@ -14,6 +14,9 @@ typedef uint8_t u1;
 typedef uint16_t u2;
 typedef uint32_t u4;
 
+/* Bytecode offsets and branch deltas are signed. */
+typedef int32_t i4;
+
 typedef enum
 {
     CLASSFILE_OK = 0,

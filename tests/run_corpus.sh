@@ -49,6 +49,25 @@ for jdk in "${jdks[@]}"; do
     done
 done
 
+echo "== generating the wide branch case =="
+if [ ! -f "$work/wide/WideBranch.class" ]; then
+    mkdir -p "$work/wide"
+    {
+        echo "public class WideBranch {"
+        echo "    public static int run(int n) {"
+        echo "        int x = 0;"
+        echo "        while (x < n) {"
+        i=0
+        while [ "$i" -lt 12000 ]; do echo "            x += 1;"; i=$((i+1)); done
+        echo "        }"
+        echo "        return x;"
+        echo "    }"
+        echo "}"
+    } > "$work/wide/WideBranch.java"
+    "${jdks[0]}/bin/javac" -nowarn -d "$work/wide" "$work/wide/WideBranch.java" >/dev/null 2>&1 \
+        && echo "  goto_w is only emitted past 32 KB of bytecode, so this class is built for it"
+fi
+
 echo "== extracting module images and ct.sym =="
 for jdk in "${jdks[@]}"; do
     name="$(basename "$jdk")"
@@ -78,6 +97,15 @@ echo "== roundtrip =="
 find "$work" \( -name '*.class' -o -name '*.sig' \) -print0 \
   | xargs -0 -n 400 "$roundtrip" 2>&1 \
   | awk '/FAIL/{f++; if (f<=10) print "  "$0}
-         /roundtrips/{split($1,a,"/"); ok+=a[1]; tot+=a[2]; code+=$4}
-         END{printf "  %d/%d class files byte-identical, %d Code attributes, %d failures\n",
-                    ok, tot, code, f+0; exit (f>0)}'
+         /^COVER/{for(i=2;i<=NF;i++){split($i,kv,"="); cover[kv[1]]+=kv[2]}}
+         /^FRAMES/{for(i=2;i<=NF;i++){split($i,kv,"="); frame[kv[1]]+=kv[2]}}
+         /roundtrips/{split($1,a,"/"); ok+=a[1]; tot+=a[2]; code+=$4; ins+=$7}
+         END{printf "  %d/%d class files, %d Code attributes, %d instructions, %d failures\n",
+                    ok, tot, code, ins, f+0
+             printf "  covered:"
+             n=split("wide tableswitch lookupswitch ldc ldc_w goto_w invokedynamic invokeinterface multianewarray", k, " ")
+             for (i=1;i<=n;i++) printf " %s=%d", k[i], cover[k[i]]
+             printf "\n  frames: "
+             m=split("total chop append full uninitialized", g, " ")
+             for (i=1;i<=m;i++) printf " %s=%d", g[i], frame[g[i]]
+             printf "\n"; exit (f>0)}'

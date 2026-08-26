@@ -166,3 +166,47 @@ JNIEXPORT void JNICALL Java_HookRuntimeTest_teardown(JNIEnv *env, jclass unused)
         g_target = NULL;
     }
 }
+
+static jint g_mid_calls = 0;
+
+static void JNICALL detour_mid(JNIEnv *env, jobject self)
+{
+    (void)env;
+    (void)self;
+    g_mid_calls++;
+}
+
+JNIEXPORT jint JNICALL Java_MidHookTest_bind(JNIEnv *env, jclass unused, jclass target, jstring name)
+{
+    (void)unused;
+    const char *text = (*env)->GetStringUTFChars(env, name, NULL);
+    if (text == NULL)
+        return -1;
+
+    JNINativeMethod binding;
+    binding.name      = (char *)text;
+    binding.signature = "()V";
+    binding.fnPtr     = (void *)detour_mid;
+
+    const jint result = (*env)->RegisterNatives(env, target, &binding, 1);
+    (*env)->ReleaseStringUTFChars(env, name, text);
+
+    if (result < 0)
+    {
+        (*env)->ExceptionClear(env);
+        return -1;
+    }
+    return 0;
+}
+
+JNIEXPORT jint JNICALL Java_MidHookTest_midCalls(JNIEnv *env, jclass unused)
+{
+    (void)env; (void)unused;
+    return g_mid_calls;
+}
+
+JNIEXPORT void JNICALL Java_MidHookTest_resetMid(JNIEnv *env, jclass unused)
+{
+    (void)env; (void)unused;
+    g_mid_calls = 0;
+}

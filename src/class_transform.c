@@ -1,5 +1,7 @@
 #include "class_transform.h"
 
+#include "visitors/code_editor.h"
+
 #include <string.h>
 
 const char *transform_status_message(transform_status status)
@@ -24,6 +26,8 @@ const char *transform_status_message(transform_status status)
         return "the copy name is already taken by another method";
     case TRANSFORM_ERR_CLASSFILE:
         return "class file operation failed";
+    case TRANSFORM_ERR_BAD_OFFSET:
+        return "the offset is not an instruction boundary";
     }
     return "unknown error";
 }
@@ -159,6 +163,109 @@ transform_status class_transform_restore(ClassFile *cf,
 
     member_info_set_native(&cf->methods.items[index], false);
     member_list_remove(&cf->methods, copy_index);
+
+    return TRANSFORM_OK;
+}
+
+transform_status class_transform_insert_call(ClassFile *cf,
+                                             const char *name,
+                                             const char *descriptor,
+                                             u4 at_offset,
+                                             const char *hook_name,
+                                             classfile_status *out_cause)
+{
+    if (out_cause != NULL)
+        *out_cause = CLASSFILE_OK;
+    if (cf == NULL || name == NULL || descriptor == NULL || hook_name == NULL)
+        return TRANSFORM_ERR_METHOD_NOT_FOUND;
+
+    if ((cf->access_flags & JVM_ACC_INTERFACE) != 0)
+        return TRANSFORM_ERR_INTERFACE;
+    if (classFile_find_method(cf, hook_name, "()V") != NULL)
+        return TRANSFORM_ERR_NAME_IN_USE;
+
+    const member_info *found = classFile_find_method(cf, name, descriptor);
+    if (found == NULL)
+        return TRANSFORM_ERR_METHOD_NOT_FOUND;
+
+    const u2 index = (u2)(found - cf->methods.items);
+    if (is_initializer(cf, &cf->methods.items[index]))
+        return TRANSFORM_ERR_INITIALIZER;
+    if ((cf->methods.items[index].access_flags & JVM_ACC_ABSTRACT) != 0)
+        return TRANSFORM_ERR_ABSTRACT;
+    if ((cf->methods.items[index].access_flags & JVM_ACC_NATIVE) != 0)
+        return TRANSFORM_ERR_ALREADY_NATIVE;
+
+    attribute_info *code = attribute_list_find(&cf->methods.items[index].attributes,
+                                               &cf->constant_pool, "Code");
+    if (code == NULL)
+        return TRANSFORM_ERR_NO_CODE;
+
+    const bool is_static = (cf->methods.items[index].access_flags & JVM_ACC_STATIC) != 0;
+
+    u2 hook_name_index = 0;
+    classfile_status status = classFile_intern_utf8(cf, hook_name, &hook_name_index);
+    if (status != CLASSFILE_OK)
+        return fail(status, out_cause);
+
+    u2 void_index = 0;
+    status = classFile_intern_utf8(cf, "()V", &void_index);
+    if (status != CLASSFILE_OK)
+        return fail(status, out_cause);
+
+    u2 methodref = 0;
+    status = classFile_intern_methodref(cf, cf->this_class, hook_name, "()V", &methodref);
+    if (status != CLASSFILE_OK)
+        return fail(status, out_cause);
+
+    /* Interning may have reallocated the pool, but the Code attribute lives in
+       the method list, which was not touched. Look it up again anyway so that a
+       later change to the interning path cannot leave a stale pointer here. */
+    code = attribute_list_find(&cf->methods.items[index].attributes,
+                               &cf->constant_pool, "Code");
+
+    code_editor editor;
+    status = code_editor_load(code, &cf->constant_pool, &editor);
+    if (status != CLASSFILE_OK)
+        return fail(status, out_cause);
+
+    instruction nodes[2];
+    memset(nodes, 0, sizeof(nodes));
+    u4 count = 0;
+
+    if (!is_static)
+    {
+        nodes[count].opcode = JVM_OPC_aload_0;
+        nodes[count].kind   = OPERAND_NONE;
+        count++;
+    }
+    nodes[count].opcode      = is_static ? JVM_OPC_invokestatic : JVM_OPC_invokespecial;
+    nodes[count].kind        = OPERAND_CP_INDEX;
+    nodes[count].u.cp.index  = methodref;
+    count++;
+
+    status = code_editor_insert(&editor, at_offset, nodes, count, 1);
+    if (status != CLASSFILE_OK)
+    {
+        code_editor_free(&editor);
+        return status == CLASSFILE_ERR_CONSTANT_INDEX ? TRANSFORM_ERR_BAD_OFFSET
+                                                      : fail(status, out_cause);
+    }
+
+    status = code_editor_store(&editor, code);
+    code_editor_free(&editor);
+    if (status != CLASSFILE_OK)
+        return fail(status, out_cause);
+
+    member_info *hook = NULL;
+    status = member_list_append(&cf->methods, &hook);
+    if (status != CLASSFILE_OK)
+        return fail(status, out_cause);
+
+    hook->access_flags = (u2)(JVM_ACC_PRIVATE | JVM_ACC_FINAL | JVM_ACC_NATIVE |
+                              (is_static ? JVM_ACC_STATIC : 0));
+    hook->name_index       = hook_name_index;
+    hook->descriptor_index = void_index;
 
     return TRANSFORM_OK;
 }

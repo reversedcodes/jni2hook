@@ -139,3 +139,78 @@ classfile_status classFile_intern_utf8(ClassFile *cf, const char *text, u2 *inde
         cp_info_free(&entry);
     return appended;
 }
+
+static classfile_status intern_simple(ClassFile *cf, u1 tag, u2 a, u2 b, u2 *index)
+{
+    for (u2 i = 1; i < cf->constant_pool.count; i++)
+    {
+        const cp_info *entry = constant_pool_at(&cf->constant_pool, i);
+        if (entry == NULL || entry->tag != tag)
+            continue;
+
+        bool same = false;
+        if (tag == JVM_CONSTANT_Class)
+            same = entry->u.class_info.name_index == a;
+        else if (tag == JVM_CONSTANT_NameAndType)
+            same = entry->u.nat.name_index == a && entry->u.nat.descriptor_index == b;
+        else
+            same = entry->u.ref.class_index == a && entry->u.ref.nat_index == b;
+
+        if (same)
+        {
+            if (index != NULL)
+                *index = i;
+            return CLASSFILE_OK;
+        }
+    }
+
+    cp_info entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.tag = tag;
+    if (tag == JVM_CONSTANT_Class)
+        entry.u.class_info.name_index = a;
+    else if (tag == JVM_CONSTANT_NameAndType)
+    {
+        entry.u.nat.name_index       = a;
+        entry.u.nat.descriptor_index = b;
+    }
+    else
+    {
+        entry.u.ref.class_index = a;
+        entry.u.ref.nat_index   = b;
+    }
+
+    return constant_pool_append(&cf->constant_pool, &entry, index);
+}
+
+classfile_status classFile_intern_class(ClassFile *cf, const char *name, u2 *index)
+{
+    u2 name_index = 0;
+    const classfile_status status = classFile_intern_utf8(cf, name, &name_index);
+    if (status != CLASSFILE_OK)
+        return status;
+    return intern_simple(cf, JVM_CONSTANT_Class, name_index, 0, index);
+}
+
+classfile_status classFile_intern_name_and_type(ClassFile *cf, const char *name,
+                                                const char *descriptor, u2 *index)
+{
+    u2 name_index = 0, descriptor_index = 0;
+    classfile_status status = classFile_intern_utf8(cf, name, &name_index);
+    if (status != CLASSFILE_OK)
+        return status;
+    status = classFile_intern_utf8(cf, descriptor, &descriptor_index);
+    if (status != CLASSFILE_OK)
+        return status;
+    return intern_simple(cf, JVM_CONSTANT_NameAndType, name_index, descriptor_index, index);
+}
+
+classfile_status classFile_intern_methodref(ClassFile *cf, u2 class_index, const char *name,
+                                            const char *descriptor, u2 *index)
+{
+    u2 nat_index = 0;
+    const classfile_status status = classFile_intern_name_and_type(cf, name, descriptor, &nat_index);
+    if (status != CLASSFILE_OK)
+        return status;
+    return intern_simple(cf, JVM_CONSTANT_Methodref, class_index, nat_index, index);
+}
