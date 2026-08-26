@@ -20,6 +20,7 @@ add_library(jni2hook STATIC
     src/visitors/class_file.c
     src/visitors/code_attribute.c
     src/visitors/code_editor.c
+    src/visitors/constructor_init.c
     src/visitors/cp_info.c
     src/visitors/instruction.c
     src/visitors/member_info.c
@@ -30,7 +31,7 @@ add_library(jni2hook STATIC
 target_include_directories(jni2hook
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/include/jni2hook/jni
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 if(MSVC)
@@ -57,6 +58,9 @@ if(JNI2HOOK_BUILD_TESTS)
     target_link_libraries(j2h_transform PRIVATE jni2hook)
     target_include_directories(j2h_transform PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_options(j2h_transform PRIVATE ${JNI2HOOK_WARNINGS})
+    add_executable(j2h_utils_api tests/utils_api.c)
+    target_link_libraries(j2h_utils_api PRIVATE jni2hook)
+    target_compile_options(j2h_utils_api PRIVATE ${JNI2HOOK_WARNINGS})
     add_executable(j2h_jni_headers tests/jni_headers.c)
     target_link_libraries(j2h_jni_headers PRIVATE jni2hook)
     add_library(j2h_runtime_test SHARED tests/runtime/hook_runtime.c)

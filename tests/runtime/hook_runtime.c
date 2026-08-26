@@ -14,6 +14,7 @@ static int       g_insert_second = 0;
 static int       g_insert_static = 0;
 static int       g_ctor_direct   = 0;
 static int       g_ctor_delegate = 0;
+static int       g_ctor_complex  = 0;
 
 static jint JNICALL detour_compute(JNIEnv *env, jobject self, jint a, jint b)
 {
@@ -76,6 +77,13 @@ static void JNICALL detour_ctor_delegate(JNIEnv *env, jobject self)
     (void)env;
     (void)self;
     g_ctor_delegate++;
+}
+
+static void JNICALL detour_ctor_complex(JNIEnv *env, jobject self)
+{
+    (void)env;
+    (void)self;
+    g_ctor_complex++;
 }
 
 JNIEXPORT jint JNICALL Java_HookRuntimeTest_setup(JNIEnv *env, jclass unused)
@@ -255,6 +263,14 @@ JNIEXPORT jint JNICALL Java_HookRuntimeTest_hookCtorDelegate(JNIEnv *env, jclass
                       (void *)detour_ctor_delegate);
 }
 
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_hookCtorComplex(JNIEnv *env, jclass unused,
+                                                            jclass target)
+{
+    (void)unused;
+    return install_at(env, target, "<init>", "()V", false, 0,
+                      (void *)detour_ctor_complex);
+}
+
 JNIEXPORT jint JNICALL Java_HookRuntimeTest_unhookCtorDirect(JNIEnv *env, jclass unused,
                                                              jclass target)
 {
@@ -264,6 +280,13 @@ JNIEXPORT jint JNICALL Java_HookRuntimeTest_unhookCtorDirect(JNIEnv *env, jclass
 
 JNIEXPORT jint JNICALL Java_HookRuntimeTest_unhookCtorDelegate(JNIEnv *env, jclass unused,
                                                                jclass target)
+{
+    (void)unused;
+    return uninstall(env, target, "<init>", "()V", false);
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_unhookCtorComplex(JNIEnv *env, jclass unused,
+                                                              jclass target)
 {
     (void)unused;
     return uninstall(env, target, "<init>", "()V", false);
@@ -325,12 +348,20 @@ JNIEXPORT jint JNICALL Java_HookRuntimeTest_ctorDelegateCalls(JNIEnv *env, jclas
     return g_ctor_delegate;
 }
 
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_ctorComplexCalls(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    return g_ctor_complex;
+}
+
 JNIEXPORT void JNICALL Java_HookRuntimeTest_resetCtorCalls(JNIEnv *env, jclass unused)
 {
     (void)env;
     (void)unused;
     g_ctor_direct = 0;
     g_ctor_delegate = 0;
+    g_ctor_complex = 0;
 }
 
 static jint scan_signature(JNIEnv *env, jclass target, bool all_classes)

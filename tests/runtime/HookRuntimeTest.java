@@ -17,8 +17,10 @@ public class HookRuntimeTest {
     static native int unhookInsertStatic(Class<?> target);
     static native int hookCtorDirect(Class<?> target);
     static native int hookCtorDelegate(Class<?> target);
+    static native int hookCtorComplex(Class<?> target);
     static native int unhookCtorDirect(Class<?> target);
     static native int unhookCtorDelegate(Class<?> target);
+    static native int unhookCtorComplex(Class<?> target);
     static native int calls();
     static native void resetCalls();
     static native int insertFirstCalls();
@@ -27,6 +29,7 @@ public class HookRuntimeTest {
     static native void resetInsertCalls();
     static native int ctorDirectCalls();
     static native int ctorDelegateCalls();
+    static native int ctorComplexCalls();
     static native void resetCtorCalls();
     static native int scanInClass(Class<?> target);
     static native int scanGlobally(Class<?> target);
@@ -67,6 +70,27 @@ public class HookRuntimeTest {
 
         public ConstructorTarget(int value) {
             this.value = value;
+        }
+    }
+
+    public static class ConstructorBase {
+        final int value;
+
+        public ConstructorBase() {
+            value = 1;
+        }
+
+        public ConstructorBase(ConstructorBase argument) {
+            value = argument.value + 1;
+        }
+    }
+
+    public static class ComplexConstructorTarget extends ConstructorBase {
+        final ConstructorBase after;
+
+        public ComplexConstructorTarget() {
+            super(new ConstructorBase());
+            after = new ConstructorBase();
         }
     }
 
@@ -184,13 +208,25 @@ public class HookRuntimeTest {
         check("delegated constructor hook ran", ctorDirectCalls(), 1);
         check("delegating constructor hook ran", ctorDelegateCalls(), 1);
 
+        check("install constructor hook around same-owner allocations",
+                hookCtorComplex(ComplexConstructorTarget.class) == 0);
+        resetCtorCalls();
+        ComplexConstructorTarget complex = new ComplexConstructorTarget();
+        check("complex constructor body continues",
+                complex.value == 2 && complex.after.value == 1);
+        check("hook selected the uninitialized-this call", ctorComplexCalls(), 1);
+
         check("uninstall direct-super constructor hook",
                 unhookCtorDirect(ConstructorTarget.class) == 0);
         check("uninstall delegating-this constructor hook",
                 unhookCtorDelegate(ConstructorTarget.class) == 0);
+        check("uninstall complex constructor hook",
+                unhookCtorComplex(ComplexConstructorTarget.class) == 0);
         resetCtorCalls();
         check("constructors remain original after uninstall", new ConstructorTarget().value, 7);
-        check("constructor hooks removed", ctorDirectCalls() == 0 && ctorDelegateCalls() == 0);
+        new ComplexConstructorTarget();
+        check("constructor hooks removed", ctorDirectCalls() == 0 &&
+                ctorDelegateCalls() == 0 && ctorComplexCalls() == 0);
 
         check("reinstall after full uninstall", hookCompute(HookRuntimeTest.class) == 0);
         check("compute hooked again", o.compute(2, 3), 50);

@@ -1,6 +1,7 @@
 #include "class_transform.h"
 
 #include "visitors/code_editor.h"
+#include "visitors/constructor_init.h"
 
 #include <string.h>
 
@@ -41,41 +42,6 @@ static bool is_initializer(const ClassFile *cf, const member_info *method)
 static bool is_instance_initializer(const ClassFile *cf, const member_info *method)
 {
     return classFile_utf8_equals(cf, method->name_index, "<init>");
-}
-
-static bool initializes_this(const ClassFile *cf, const instruction *node)
-{
-    if (node->opcode != JVM_OPC_invokespecial || node->kind != OPERAND_CP_INDEX)
-        return false;
-
-    const cp_info *methodref = constant_pool_at(&cf->constant_pool, node->u.cp.index);
-    if (methodref == NULL || methodref->tag != JVM_CONSTANT_Methodref)
-        return false;
-    if (methodref->u.ref.class_index != cf->this_class &&
-        methodref->u.ref.class_index != cf->super_class)
-        return false;
-
-    const cp_info *name_and_type =
-        constant_pool_at(&cf->constant_pool, methodref->u.ref.nat_index);
-    return name_and_type != NULL && name_and_type->tag == JVM_CONSTANT_NameAndType &&
-           constant_pool_utf8_equals(&cf->constant_pool,
-                                     name_and_type->u.nat.name_index, "<init>");
-}
-
-static bool initialized_offset(const ClassFile *cf,
-                               const instruction_list *instructions,
-                               u4 *out_offset)
-{
-    for (u4 i = 0; i < instructions->count; i++)
-    {
-        const instruction *node = &instructions->items[i];
-        if (initializes_this(cf, node))
-        {
-            *out_offset = node->offset + instruction_length_at(node, node->offset);
-            return true;
-        }
-    }
-    return false;
 }
 
 static u2 copy_flags(u2 original_flags)
@@ -273,7 +239,7 @@ transform_status class_transform_insert_call(ClassFile *cf,
     if (is_constructor)
     {
         u4 safe_offset = 0;
-        if (!initialized_offset(cf, &editor.instructions, &safe_offset))
+        if (!constructor_init_offset(cf, &editor, &safe_offset))
         {
             code_editor_free(&editor);
             return TRANSFORM_ERR_INITIALIZER;
