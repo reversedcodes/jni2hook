@@ -14,6 +14,7 @@ add_library(jni2hook STATIC
     src/visitors/code_attribute.c
     src/visitors/cp_info.c
     src/visitors/member_info.c
+    src/visitors/visitor.c
 )
 
 target_include_directories(jni2hook
