@@ -66,9 +66,9 @@ target_link_libraries(my_library PRIVATE jni2hook::jni2hook)
 
 ## Releases
 
-Pushing a version tag such as `v0.1.0` builds installable Linux and Windows
-archives and publishes them on the GitHub Releases page. Regular pushes and
-pull requests build the library, examples, tests, and an installed-package
+Pushing a version tag such as `1.0` or `v1.0.0` builds installable Linux and
+Windows archives and publishes them on the GitHub Releases page. Regular pushes
+and pull requests build the library, examples, tests, and an installed-package
 consumer with GCC, Clang, and MSVC.
 
 As a subdirectory:
