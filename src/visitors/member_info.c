@@ -1,4 +1,4 @@
-#include "member_info.h"
+#include "jni2hook/utils/visitors/member_info.h"
 
 #include <stdlib.h>
 #include <string.h>

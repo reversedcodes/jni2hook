@@ -1,4 +1,4 @@
-#include "constructor_init.h"
+#include "jni2hook/utils/visitors/constructor_init.h"
 
 #include <stdlib.h>
 #include <string.h>

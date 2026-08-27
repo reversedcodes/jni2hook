@@ -1,7 +1,7 @@
 #ifndef JNI2HOOK_CLASSFILE_PARSER_H
 #define JNI2HOOK_CLASSFILE_PARSER_H
 
-#include "visitors/class_file.h"
+#include "jni2hook/utils/visitors/class_file.h"
 
 /* Reads a class file into a node tree. The input buffer is not retained: every
    node owns a copy of its own bytes, so the tree can be edited freely and the

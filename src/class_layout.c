@@ -1,6 +1,6 @@
 #include "jni2hook/jni2hook.h"
 
-#include "class_file_parser.h"
+#include "jni2hook/utils/class_file_parser.h"
 
 #include <stdlib.h>
 #include <string.h>

@@ -1,5 +1,5 @@
-#include "class_file_parser.h"
-#include "class_transform.h"
+#include "jni2hook/utils/class_file_parser.h"
+#include "jni2hook/utils/class_transform.h"
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,9 +1,9 @@
 #ifndef JNI2HOOK_VISITORS_VISITOR_H
 #define JNI2HOOK_VISITORS_VISITOR_H
 
-#include "java_version.h"
+#include "../java_version.h"
 
-#include "class_file_constant.h"
+#include "../class_file_constant.h"
 
 #include <stdbool.h>
 #include <stddef.h>

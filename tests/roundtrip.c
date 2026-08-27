@@ -1,8 +1,8 @@
-#include "class_file_parser.h"
-#include "visitors/code_attribute.h"
-#include "visitors/instruction.h"
-#include "visitors/stack_map_table.h"
-#include "visitors/code_editor.h"
+#include "jni2hook/utils/class_file_parser.h"
+#include "jni2hook/utils/visitors/code_attribute.h"
+#include "jni2hook/utils/visitors/instruction.h"
+#include "jni2hook/utils/visitors/stack_map_table.h"
+#include "jni2hook/utils/visitors/code_editor.h"
 
 #include <stdio.h>
 #include <stdlib.h>

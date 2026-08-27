@@ -1,7 +1,7 @@
 #include "field_scan.h"
 
 #include "bytecode_scan.h"
-#include "visitors/cp_info.h"
+#include "jni2hook/utils/visitors/cp_info.h"
 
 #include <stdlib.h>
 #include <string.h>

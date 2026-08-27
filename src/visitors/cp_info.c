@@ -1,6 +1,6 @@
-#include "cp_info.h"
+#include "jni2hook/utils/visitors/cp_info.h"
 
-#include "../byte_stream.h"
+#include "jni2hook/utils/byte_stream.h"
 
 #include <stdlib.h>
 #include <string.h>

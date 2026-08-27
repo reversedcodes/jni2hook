@@ -1,4 +1,4 @@
-#include "attribute_info.h"
+#include "jni2hook/utils/visitors/attribute_info.h"
 
 #include <stdlib.h>
 #include <string.h>

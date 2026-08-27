@@ -12,9 +12,17 @@ static u1 *read_file(const char *path, size_t *size)
     FILE *f = fopen(path, "rb");
     if (f == NULL)
         return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_END) != 0)
+    {
+        fclose(f);
+        return NULL;
+    }
     const long length = ftell(f);
-    if (length < 0) { fclose(f); return NULL; }
+    if (length < 0)
+    {
+        fclose(f);
+        return NULL;
+    }
     rewind(f);
 
     u1 *data = malloc((size_t)length ? (size_t)length : 1);
@@ -54,9 +62,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    printf("major=%u minor=%u constants=%u fields=%u methods=%u\n",
-           cf->major_version, cf->minor_version, cf->constant_pool.count,
-           cf->fields.count, cf->methods.count);
+    printf("major=%u minor=%u constants=%u fields=%u methods=%u\n", cf->major_version,
+           cf->minor_version, cf->constant_pool.count, cf->fields.count, cf->methods.count);
 
     int failures = 0;
     size_t instructions = 0, frames = 0;
@@ -68,11 +75,10 @@ int main(int argc, char **argv)
         u2 name_length = 0, descriptor_length = 0;
 
         constant_pool_utf8(&cf->constant_pool, method->name_index, &name, &name_length);
-        constant_pool_utf8(&cf->constant_pool, method->descriptor_index,
-                           &descriptor, &descriptor_length);
+        constant_pool_utf8(&cf->constant_pool, method->descriptor_index, &descriptor,
+                           &descriptor_length);
 
-        attribute_info *code = attribute_list_find(&method->attributes,
-                                                   &cf->constant_pool, "Code");
+        attribute_info *code = attribute_list_find(&method->attributes, &cf->constant_pool, "Code");
         printf("  %.*s%.*s%s\n", name_length, name, descriptor_length, descriptor,
                code == NULL ? "  (no body)" : "");
         if (code == NULL)
@@ -87,7 +93,7 @@ int main(int argc, char **argv)
         }
 
         instructions += editor.instructions.count;
-        frames       += editor.stack_map.count;
+        frames += editor.stack_map.count;
 
         attribute_info back;
         memset(&back, 0, sizeof(back));
@@ -107,15 +113,13 @@ int main(int argc, char **argv)
     u1 *rebuilt = NULL;
     size_t rebuilt_size = 0;
     status = classfile_serialize(cf, &rebuilt, &rebuilt_size);
-    if (status != CLASSFILE_OK || rebuilt_size != size ||
-        memcmp(rebuilt, data, size) != 0)
+    if (status != CLASSFILE_OK || rebuilt_size != size || memcmp(rebuilt, data, size) != 0)
     {
         printf("class file did not survive a round trip\n");
         failures++;
     }
 
-    printf("%zu instructions, %zu stack map frames, %d failures\n",
-           instructions, frames, failures);
+    printf("%zu instructions, %zu stack map frames, %d failures\n", instructions, frames, failures);
 
     free(rebuilt);
     classFile_destroy(cf);

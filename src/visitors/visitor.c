@@ -1,4 +1,4 @@
-#include "visitor.h"
+#include "jni2hook/utils/visitors/visitor.h"
 
 const char *classfile_status_message(classfile_status status)
 {

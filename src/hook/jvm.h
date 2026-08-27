@@ -6,6 +6,10 @@
 
 #include <stdbool.h>
 
+/* Finds the JVM already running in this process. An injected library is never
+   handed one, so it has to ask libjvm, which is loaded by definition. */
+JavaVM *jvm_find_running(void);
+
 bool jvm_bind(JavaVM *vm);
 void jvm_release(void);
 

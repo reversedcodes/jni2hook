@@ -1,14 +1,20 @@
 #include "jvm.h"
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 #include <stdlib.h>
 #include <string.h>
 
-static JavaVM   *g_vm    = NULL;
+static JavaVM *g_vm = NULL;
 static jvmtiEnv *g_jvmti = NULL;
 
 static jvmtiEnv *create_jvmti(JavaVM *vm)
 {
-    static const jint versions[] = { JVMTI_VERSION_1_2, JVMTI_VERSION_1_1, JVMTI_VERSION_1_0 };
+    static const jint versions[] = {JVMTI_VERSION_1_2, JVMTI_VERSION_1_1, JVMTI_VERSION_1_0};
 
     for (size_t i = 0; i < sizeof(versions) / sizeof(versions[0]); i++)
     {
@@ -17,6 +23,44 @@ static jvmtiEnv *create_jvmti(JavaVM *vm)
             return jvmti;
     }
     return NULL;
+}
+
+typedef jint (*get_created_vms_fn)(JavaVM **, jsize, jsize *);
+
+JavaVM *jvm_find_running(void)
+{
+    get_created_vms_fn get_vms = NULL;
+
+#if defined(_WIN32)
+    HMODULE jvm = GetModuleHandleA("jvm.dll");
+    if (jvm != NULL)
+    {
+        FARPROC symbol = GetProcAddress(jvm, "JNI_GetCreatedJavaVMs");
+        if (symbol != NULL)
+        {
+            _Static_assert(sizeof(get_vms) == sizeof(symbol),
+                           "Windows function pointers must have one representation");
+            memcpy(&get_vms, &symbol, sizeof(get_vms));
+        }
+    }
+#else
+    union
+    {
+        void *symbol;
+        get_created_vms_fn function;
+    } found = {dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs")};
+    get_vms = found.function;
+#endif
+
+    if (get_vms == NULL)
+        return NULL;
+
+    JavaVM *vm = NULL;
+    jsize count = 0;
+    if (get_vms(&vm, 1, &count) != JNI_OK || count < 1)
+        return NULL;
+
+    return vm;
 }
 
 bool jvm_bind(JavaVM *vm)
@@ -41,8 +85,15 @@ void jvm_release(void)
     g_vm = NULL;
 }
 
-JavaVM   *jvm_vm(void)    { return g_vm; }
-jvmtiEnv *jvm_jvmti(void) { return g_jvmti; }
+JavaVM *jvm_vm(void)
+{
+    return g_vm;
+}
+
+jvmtiEnv *jvm_jvmti(void)
+{
+    return g_jvmti;
+}
 
 JNIEnv *jvm_env(void)
 {
@@ -59,8 +110,8 @@ JNIEnv *jvm_env(void)
 
     JavaVMAttachArgs args;
     args.version = JNI_VERSION_1_6;
-    args.name    = "jni2hook";
-    args.group   = NULL;
+    args.name = "jni2hook";
+    args.group = NULL;
 
     if ((*g_vm)->AttachCurrentThreadAsDaemon(g_vm, (void **)&env, &args) != JNI_OK)
         return NULL;

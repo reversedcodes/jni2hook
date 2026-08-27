@@ -1,6 +1,6 @@
-#include "instruction.h"
+#include "jni2hook/utils/visitors/instruction.h"
 
-#include "../byte_stream.h"
+#include "jni2hook/utils/byte_stream.h"
 
 #include <stdlib.h>
 #include <string.h>

@@ -1,7 +1,7 @@
-#include "class_transform.h"
+#include "jni2hook/utils/class_transform.h"
 
-#include "visitors/code_editor.h"
-#include "visitors/constructor_init.h"
+#include "jni2hook/utils/visitors/code_editor.h"
+#include "jni2hook/utils/visitors/constructor_init.h"
 
 #include <string.h>
 

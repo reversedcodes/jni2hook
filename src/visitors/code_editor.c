@@ -1,6 +1,6 @@
-#include "code_editor.h"
+#include "jni2hook/utils/visitors/code_editor.h"
 
-#include "../byte_stream.h"
+#include "jni2hook/utils/byte_stream.h"
 
 #include <stdlib.h>
 #include <string.h>

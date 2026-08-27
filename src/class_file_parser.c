@@ -1,6 +1,6 @@
-#include "class_file_parser.h"
+#include "jni2hook/utils/class_file_parser.h"
 
-#include "byte_stream.h"
+#include "jni2hook/utils/byte_stream.h"
 
 #include <string.h>
 

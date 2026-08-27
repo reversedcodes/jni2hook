@@ -5,14 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 jni2hook rewrites Java class files from C so that a method can be hooked from
-native code, and applies the rewrite to a **running** JVM through JVMTI. It is a
-from-scratch replacement for `rdbo/jnihook`, without that project's C++ and jnif
-dependency.
+native code, and applies the rewrite to a **running** JVM through JVMTI.
 
-Two things it deliberately does not have: a JDK dependency and any Java code.
-The JVM constants live in `src/class_file_constant.h` and the JNI and JVMTI
-headers in `include/jni2hook/jni/`, all vendored from OpenJDK. `JAVA_HOME` is
-never consulted by the build. A JDK is only needed to *test*.
+The runtime library deliberately has no JDK dependency. The JVM constants live
+in `include/jni2hook/utils/class_file_constant.h` and the JNI and JVMTI headers
+in `include/jni2hook/jni/`, all vendored from OpenJDK. `JAVA_HOME` is never
+consulted by the build. A JDK is only needed to run the tests and examples.
 
 ## Build
 
@@ -185,9 +183,11 @@ copy also has to inherit every flag that describes the body it took over:
 `SYNCHRONIZED` or the moved code loses its monitor, `BRIDGE` or the verifier
 stops being lenient about a javac bridge's covariant return.
 
-`<init>`, `<clinit>` and any method of an interface are rejected: none of them
-may be native, and a hook at offset 0 of a constructor would sit before the
-`super()` call where `this` is still uninitialized.
+The native-replacement transform rejects `<init>`, `<clinit>` and interface
+methods. Inserted callbacks support instance constructors: an offset before the
+initializing `this()` or `super()` call is moved immediately after the call,
+where the verifier considers `this` initialized. Static initializers remain
+unsupported.
 
 ### The runtime layer, and the flag that gates all of it
 
@@ -254,8 +254,11 @@ disarmed. This is documented in the public header and is not a bug to fix here.
 
 ## Conventions
 
-- C11, no dependencies beyond libc and `dlfcn`/`windows.h`.
-- Include paths are rooted at `src/`; the vendored JNI headers resolve as
+- C11, no dependencies beyond libc plus `pthread`/`dlfcn` on Unix or
+  `windows.h` on Windows. Compiler extensions stay enabled deliberately for
+  `PTHREAD_MUTEX_RECURSIVE` and `RTLD_DEFAULT`.
+- Public class-file utilities live below `include/jni2hook/utils/`. Private
+  runtime headers remain rooted at `src/`; vendored JNI headers resolve as
   `<jni.h>` because `include/jni2hook/jni` is on the include path.
 - The vendored OpenJDK files carry Oracle's GPLv2-with-Classpath-Exception
   header, which has to stay intact. Provenance and the reason for pinning to

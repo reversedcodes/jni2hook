@@ -1,7 +1,7 @@
 #ifndef JNI2HOOK_BYTE_STREAM_H
 #define JNI2HOOK_BYTE_STREAM_H
 
-#include "visitors/visitor.h"
+#include "jni2hook/utils/visitors/visitor.h"
 
 /* Bounds checked big endian reader. Once a read runs past the end the cursor
    latches into a failed state, so callers may read a whole structure and check

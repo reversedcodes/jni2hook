@@ -8,7 +8,8 @@
 #include <jvmti.h>
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
 typedef enum
@@ -71,6 +72,11 @@ int JNI2Hook_ForcedRedefinitionFlag(void);
 /* Binds to the VM and acquires the JVMTI capabilities. Call once. */
 jni2hook_status JNI2Hook_Init(JavaVM *vm);
 
+/* Same, but finds the JVM running in this process instead of being handed one.
+   This is what an injected library wants: it is never called by the JVM, so it
+   has no JavaVM to start from. */
+jni2hook_status JNI2Hook_InitFromRunningVm(void);
+
 /* Attaches the calling thread to the VM if it is not a Java thread yet and
    hands back its JNIEnv. Every other entry point does this for itself, so this
    is only needed when the caller wants a JNIEnv of its own. */
@@ -100,39 +106,32 @@ jni2hook_status JNI2Hook_Install(jmethodID method, void *native_function, jmetho
 
    native_function has the signature (JNIEnv *, jobject) for an instance
    method and (JNIEnv *, jclass) for a static method, and returns void. */
-jni2hook_status JNI2Hook_InstallAt(jmethodID method,
-                                  uint32_t bytecode_offset,
-                                  void *native_function);
+jni2hook_status JNI2Hook_InstallAt(jmethodID method, uint32_t bytecode_offset,
+                                   void *native_function);
 
 /* Finds the first method whose bytecode contains pattern. Tokens are two hex
    digits separated by whitespace; ? and ?? match any byte. The returned offset
    is relative to the original method bytecode and can be passed directly to
    JNI2Hook_InstallAt. */
-jni2hook_status JNI2Hook_FindMethod(const char *pattern,
-                                   jmethodID *out_method,
-                                   uint32_t *out_bytecode_offset,
-                                   jni2hook_search_stats *out_stats);
+jni2hook_status JNI2Hook_FindMethod(const char *pattern, jmethodID *out_method,
+                                    uint32_t *out_bytecode_offset,
+                                    jni2hook_search_stats *out_stats);
 
-jni2hook_status JNI2Hook_FindMethodInClass(jclass target,
-                                          const char *pattern,
-                                          jmethodID *out_method,
-                                          uint32_t *out_bytecode_offset);
+jni2hook_status JNI2Hook_FindMethodInClass(jclass target, const char *pattern,
+                                           jmethodID *out_method, uint32_t *out_bytecode_offset);
 
 /* Resolves a field through a bytecode signature: the pattern picks the method,
    instruction_offset steps to a field access inside it, and the constant pool
    index of that instruction names the field. Lets an obfuscated field be found
    by where it is used rather than by its name. */
-jni2hook_status JNI2Hook_FindFieldInClass(jclass target,
-                                          const char *pattern,
-                                          uint32_t instruction_offset,
-                                          jfieldID *out_field,
+jni2hook_status JNI2Hook_FindFieldInClass(jclass target, const char *pattern,
+                                          uint32_t instruction_offset, jfieldID *out_field,
                                           int *out_is_static);
 
 /* Reads method names and descriptors in their original class-file order. The
    returned layout owns all memory and must be released with the matching free
    function. This parser does not require JNI2Hook_Init or a running JVM. */
-jni2hook_status JNI2Hook_ReadMethodLayout(const unsigned char *class_bytes,
-                                          size_t class_size,
+jni2hook_status JNI2Hook_ReadMethodLayout(const unsigned char *class_bytes, size_t class_size,
                                           jni2hook_method_layout *out_layout);
 
 void JNI2Hook_FreeMethodLayout(jni2hook_method_layout *layout);
@@ -141,7 +140,7 @@ void JNI2Hook_FreeMethodLayout(jni2hook_method_layout *layout);
    hooks on the same class stay. */
 jni2hook_status JNI2Hook_Uninstall(jmethodID method);
 
-int  JNI2Hook_IsInstalled(jmethodID method);
+int JNI2Hook_IsInstalled(jmethodID method);
 
 /* Removes every hook and releases the JVMTI environment. */
 void JNI2Hook_Shutdown(void);

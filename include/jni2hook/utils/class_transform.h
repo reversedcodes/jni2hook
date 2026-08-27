@@ -1,7 +1,7 @@
 #ifndef JNI2HOOK_CLASS_TRANSFORM_H
 #define JNI2HOOK_CLASS_TRANSFORM_H
 
-#include "visitors/class_file.h"
+#include "jni2hook/utils/visitors/class_file.h"
 
 /* Turns a method into a native one and parks its body in a copy, which is the
    rewrite every hook is built on.

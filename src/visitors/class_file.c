@@ -1,4 +1,4 @@
-#include "class_file.h"
+#include "jni2hook/utils/visitors/class_file.h"
 
 #include <stdlib.h>
 #include <string.h>
