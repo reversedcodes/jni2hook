@@ -3,6 +3,8 @@
 
 #include "visitor.h"
 
+#include "../byte_stream.h"
+
 /* cp_info, JVMS 4.4. A tag of zero marks the unusable slot that follows a Long
    or a Double (JVMS 4.4.5) and is never written back out. */
 typedef struct
@@ -67,6 +69,10 @@ typedef struct
     u2 count;
     u2 capacity;
 } constant_pool;
+
+/* Reads a constant_pool table, count first, as it appears in a class file.
+   Also used on the bytes JVMTI GetConstantPool hands back for a loaded class. */
+classfile_status constant_pool_read(byte_cursor *c, constant_pool *pool);
 
 void constant_pool_init(constant_pool *pool);
 void constant_pool_free(constant_pool *pool);

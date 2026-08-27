@@ -4,6 +4,7 @@
 #include "class_transform.h"
 #include "hook/bytecode_scan.h"
 #include "hook/class_cache.h"
+#include "hook/field_scan.h"
 #include "hook/jvm.h"
 #include "hook/vm_structs.h"
 #include "hook/mutex.h"
@@ -511,6 +512,7 @@ jni2hook_status JNI2Hook_Init(JavaVM *vm)
     wanted.can_generate_all_class_hook_events =
         available.can_generate_all_class_hook_events;
     wanted.can_get_bytecodes = available.can_get_bytecodes;
+    wanted.can_get_constant_pool = available.can_get_constant_pool;
     wanted.can_suspend = available.can_suspend;
 
     const jvmtiError error = (*jvmti)->AddCapabilities(jvmti, &wanted);
@@ -900,4 +902,29 @@ void JNI2Hook_Shutdown(void)
 
     g_initialized = false;
     hook_mutex_unlock(&g_lock);
+}
+
+jni2hook_status JNI2Hook_FindFieldInClass(jclass target,
+                                          const char *pattern,
+                                          uint32_t instruction_offset,
+                                          jfieldID *out_field,
+                                          int *out_is_static)
+{
+    if (!g_initialized)
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
+
+    JNIEnv *env = jvm_env();
+    jvmtiEnv *jvmti = jvm_jvmti();
+    if (env == NULL)
+        return JNI2HOOK_ERR_NO_JNI;
+    if (jvmti == NULL)
+        return JNI2HOOK_ERR_NO_JVMTI;
+
+    jvmtiError error = JVMTI_ERROR_NONE;
+    const jni2hook_status status = field_scan_find_in_class(env, jvmti, target, pattern,
+                                                            instruction_offset, out_field,
+                                                            out_is_static, &error);
+    if (status == JNI2HOOK_ERR_JVMTI)
+        g_last_error = error;
+    return status;
 }

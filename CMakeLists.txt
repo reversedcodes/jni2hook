@@ -13,6 +13,7 @@ add_library(jni2hook STATIC
     src/jni2hook.c
     src/hook/bytecode_scan.c
     src/hook/class_cache.c
+    src/hook/field_scan.c
     src/hook/jvm.c
     src/hook/vm_structs.c
     src/class_file_writer.c

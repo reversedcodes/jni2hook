@@ -118,6 +118,16 @@ jni2hook_status JNI2Hook_FindMethodInClass(jclass target,
                                           jmethodID *out_method,
                                           uint32_t *out_bytecode_offset);
 
+/* Resolves a field through a bytecode signature: the pattern picks the method,
+   instruction_offset steps to a field access inside it, and the constant pool
+   index of that instruction names the field. Lets an obfuscated field be found
+   by where it is used rather than by its name. */
+jni2hook_status JNI2Hook_FindFieldInClass(jclass target,
+                                          const char *pattern,
+                                          uint32_t instruction_offset,
+                                          jfieldID *out_field,
+                                          int *out_is_static);
+
 /* Reads method names and descriptors in their original class-file order. The
    returned layout owns all memory and must be released with the matching free
    function. This parser does not require JNI2Hook_Init or a running JVM. */
