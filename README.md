@@ -38,6 +38,24 @@ cmake --build build
 
 ## Use with CMake
 
+With `FetchContent`:
+
+```cmake
+include(FetchContent)
+
+set(JNI2HOOK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(JNI2HOOK_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(JNI2HOOK_INSTALL OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(jni2hook
+    GIT_REPOSITORY https://github.com/reversedcodes/jni2hook.git
+    GIT_TAG 2dc959f4fb49cd1ee7fb8b7a8535a7bcc1d7da1f
+)
+
+FetchContent_MakeAvailable(jni2hook)
+target_link_libraries(my_library PRIVATE jni2hook::jni2hook)
+```
+
 As a subdirectory:
 
 ```cmake
