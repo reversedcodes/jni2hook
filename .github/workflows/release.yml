@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-latest
+            package: jni2hook-linux-x64
+            archive: jni2hook-linux-x64.tar.gz
+          - name: Windows x64
+            os: windows-latest
+            package: jni2hook-windows-x64
+            archive: jni2hook-windows-x64.zip
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DJNI2HOOK_BUILD_TESTS=OFF
+          -DJNI2HOOK_BUILD_EXAMPLES=OFF
+          -DJNI2HOOK_INSTALL=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Install
+        run: cmake --install build --config Release --prefix "${{ runner.temp }}/${{ matrix.package }}"
+
+      - name: Create Linux archive
+        if: runner.os == 'Linux'
+        working-directory: ${{ runner.temp }}
+        run: cmake -E tar cfvz "${{ github.workspace }}/${{ matrix.archive }}" "${{ matrix.package }}"
+
+      - name: Create Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          Compress-Archive
+          -Path "${{ runner.temp }}/${{ matrix.package }}"
+          -DestinationPath "${{ github.workspace }}/${{ matrix.archive }}"
+
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.package }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    if: github.event_name == 'push'
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}" dist/*
+          --repo "${GITHUB_REPOSITORY}"
+          --title "jni2hook ${GITHUB_REF_NAME}"
+          --generate-notes
+          --verify-tag

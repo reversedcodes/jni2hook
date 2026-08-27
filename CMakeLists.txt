@@ -81,6 +81,8 @@ if(NOT WIN32)
 endif()
 
 if(JNI2HOOK_BUILD_TESTS)
+    enable_testing()
+
     add_executable(j2h_roundtrip tests/roundtrip.c)
     target_link_libraries(j2h_roundtrip PRIVATE jni2hook)
     target_include_directories(j2h_roundtrip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -93,10 +95,25 @@ if(JNI2HOOK_BUILD_TESTS)
 
     add_executable(j2h_jni_headers tests/jni_headers.c)
     target_link_libraries(j2h_jni_headers PRIVATE jni2hook)
+    add_test(NAME jni_headers COMMAND j2h_jni_headers)
 
     add_executable(j2h_utils_api tests/utils_api.c)
     target_link_libraries(j2h_utils_api PRIVATE jni2hook)
     target_compile_options(j2h_utils_api PRIVATE ${JNI2HOOK_WARNINGS})
+
+    find_package(Java QUIET COMPONENTS Development)
+    if(Java_JAVAC_EXECUTABLE)
+        add_test(NAME classfile_smoke
+            COMMAND ${CMAKE_COMMAND}
+                -DJAVAC=${Java_JAVAC_EXECUTABLE}
+                -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/corpus/Basic.java
+                -DWORK=${CMAKE_CURRENT_BINARY_DIR}/classfile-smoke
+                -DROUNDTRIP=$<TARGET_FILE:j2h_roundtrip>
+                -DTRANSFORM=$<TARGET_FILE:j2h_transform>
+                -DUTILS_API=$<TARGET_FILE:j2h_utils_api>
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/classfile_smoke.cmake
+        )
+    endif()
 
     add_library(j2h_runtime_test SHARED tests/runtime/hook_runtime.c)
     target_link_libraries(j2h_runtime_test PRIVATE jni2hook)
@@ -110,6 +127,7 @@ if(JNI2HOOK_BUILD_TESTS)
         target_link_libraries(j2h_vm_structs_windows PRIVATE jni2hook)
         target_include_directories(j2h_vm_structs_windows PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         add_dependencies(j2h_vm_structs_windows j2h_fake_jvm)
+        add_test(NAME vm_structs_windows COMMAND j2h_vm_structs_windows)
     endif()
 endif()
 

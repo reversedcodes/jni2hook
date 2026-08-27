@@ -1,5 +1,7 @@
 # jni2hook
 
+[![CI](https://github.com/reversedcodes/jni2hook/actions/workflows/ci.yml/badge.svg)](https://github.com/reversedcodes/jni2hook/actions/workflows/ci.yml)
+
 jni2hook is a C11 library for hooking Java methods in a running HotSpot JVM.
 It rewrites class files through JVMTI and has no build-time JDK dependency. JNI,
 JVMTI, and class-file constants are vendored from OpenJDK.
@@ -36,6 +38,12 @@ cmake -S . -B build -DJNI2HOOK_BUILD_EXAMPLES=ON
 cmake --build build
 ```
 
+Run the registered smoke tests with:
+
+```sh
+ctest --test-dir build --output-on-failure
+```
+
 ## Use with CMake
 
 With `FetchContent`:
@@ -55,6 +63,13 @@ FetchContent_Declare(jni2hook
 FetchContent_MakeAvailable(jni2hook)
 target_link_libraries(my_library PRIVATE jni2hook::jni2hook)
 ```
+
+## Releases
+
+Pushing a version tag such as `v0.1.0` builds installable Linux and Windows
+archives and publishes them on the GitHub Releases page. Regular pushes and
+pull requests build the library, examples, tests, and an installed-package
+consumer with GCC, Clang, and MSVC.
 
 As a subdirectory:
 
