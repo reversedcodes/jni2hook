@@ -36,11 +36,29 @@
 #include <string.h>
 
 #define BRIDGE_NAME "HookBridge"
+#define HANDLE_BRIDGE_NAME "HandleBridge"
+
+/* Which method of the target the handle bridge should be given, by class file
+   slot rather than by name. The slot is what survives obfuscation; the name is
+   read out of the class file at run time, so it is never written down here.
+   Note that javac does not emit methods in source order -- this one is second,
+   not third -- which is exactly why the layout is read rather than assumed. */
+#define BOUND_SLOT 1
 
 static int g_reports = 0;
 static jint g_id = 0;
 static jint g_value = 0;
 static char g_label[64] = {0};
+
+/* The name-free bridge reports without a label, so it needs its own binding. */
+static void JNICALL on_report_plain(JNIEnv *env, jclass owner, jint id, jint value)
+{
+    (void)env;
+    (void)owner;
+    g_reports++;
+    g_id = id;
+    g_value = value;
+}
 
 static void JNICALL on_report(JNIEnv *env, jclass owner, jint id, jint value, jstring label)
 {
@@ -207,6 +225,151 @@ JNIEXPORT jint JNICALL Java_BridgeTest_run(JNIEnv *env, jclass unused, jclass ta
     free(rewritten);
     if (redefined != JVMTI_ERROR_NONE)
         printf("      RedefineClasses returned %d\n", (int)redefined);
+    check("RedefineClasses with the flag off", redefined == JVMTI_ERROR_NONE);
+
+    return failures;
+}
+
+/* Resolves the target's method at BOUND_SLOT without anyone naming it, turns it
+   into a java.lang.reflect.Method and lets the bridge make a MethodHandle of
+   it. That is the whole answer to "why not just void*": the receiver can stay
+   an Object, as long as the things to call on it were bound beforehand. */
+static bool bind_by_slot(JNIEnv *env, jclass target, jclass bridge)
+{
+    jint original_size = 0;
+    const unsigned char *original = class_cache_get(env, target, &original_size);
+    if (original == NULL)
+        return false;
+
+    jni2hook_method_layout layout;
+    memset(&layout, 0, sizeof(layout));
+    if (JNI2Hook_ReadMethodLayout(original, (size_t)original_size, &layout) != JNI2HOOK_OK)
+        return false;
+
+    if (BOUND_SLOT >= layout.count)
+    {
+        JNI2Hook_FreeMethodLayout(&layout);
+        return false;
+    }
+
+    for (size_t i = 0; i < layout.count; i++)
+        printf("      slot %zu: %s%s\n", i, layout.methods[i].name,
+               layout.methods[i].descriptor);
+
+    jmethodID method = (*env)->GetMethodID(env, target, layout.methods[BOUND_SLOT].name,
+                                           layout.methods[BOUND_SLOT].descriptor);
+    JNI2Hook_FreeMethodLayout(&layout);
+    if (method == NULL)
+    {
+        (*env)->ExceptionClear(env);
+        return false;
+    }
+
+    jobject reflected = (*env)->ToReflectedMethod(env, target, method, JNI_FALSE);
+    if (reflected == NULL)
+    {
+        (*env)->ExceptionClear(env);
+        return false;
+    }
+
+    jmethodID bind = (*env)->GetStaticMethodID(env, bridge, "bind", "(ILjava/lang/Object;)V");
+    if (bind == NULL)
+    {
+        (*env)->ExceptionClear(env);
+        return false;
+    }
+
+    (*env)->CallStaticVoidMethod(env, bridge, bind, 0, reflected);
+    if ((*env)->ExceptionCheck(env))
+    {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        return false;
+    }
+    return true;
+}
+
+JNIEXPORT jint JNICALL Java_BridgeTest_runHandles(JNIEnv *env, jclass unused, jclass target,
+                                                  jstring bridge_path)
+{
+    (void)unused;
+    failures = 0;
+
+    const char *path = (*env)->GetStringUTFChars(env, bridge_path, NULL);
+    size_t bridge_size = 0;
+    unsigned char *bridge = path != NULL ? read_file(path, &bridge_size) : NULL;
+    if (path != NULL)
+        (*env)->ReleaseStringUTFChars(env, bridge_path, path);
+    check("read the name-free bridge", bridge != NULL);
+    if (bridge == NULL)
+        return 1;
+
+    jvmtiEnv *jvmti = jvm_jvmti();
+    jobject loader = NULL;
+    (*jvmti)->GetClassLoader(jvmti, target, &loader);
+
+    jclass bridge_class = (*env)->DefineClass(env, HANDLE_BRIDGE_NAME, loader,
+                                              (const jbyte *)bridge, (jsize)bridge_size);
+    if ((*env)->ExceptionCheck(env))
+    {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+    free(bridge);
+    check("DefineClass", bridge_class != NULL);
+    if (bridge_class == NULL)
+        return 1;
+
+    union
+    {
+        void *pointer;
+        void (JNICALL *report)(JNIEnv *, jclass, jint, jint);
+    } entry = {NULL};
+    entry.report = on_report_plain;
+
+    JNINativeMethod binding;
+    binding.name = (char *)"report";
+    binding.signature = (char *)"(II)V";
+    binding.fnPtr = entry.pointer;
+    check("RegisterNatives", (*env)->RegisterNatives(env, bridge_class, &binding, 1) == 0);
+    if ((*env)->ExceptionCheck(env))
+        (*env)->ExceptionClear(env);
+
+    check("bound the target's method by slot, never by name",
+          bind_by_slot(env, target, bridge_class));
+
+    jint original_size = 0;
+    const unsigned char *original = class_cache_get(env, target, &original_size);
+    ClassFile *cf = NULL;
+    check("parsed the original",
+          original != NULL &&
+              classfile_parse(original, (size_t)original_size, &cf) == CLASSFILE_OK);
+    if (cf == NULL)
+        return 1;
+
+    const u2 before = cf->methods.count;
+    classfile_status cause = CLASSFILE_OK;
+    const transform_status transformed = class_transform_insert_static_call(
+        cf, "work", "(ILjava/lang/String;)I", 0, HANDLE_BRIDGE_NAME, "enter", 9, true, &cause);
+    if (transformed != TRANSFORM_OK)
+        printf("      transform: %s (%s)\n", transform_status_message(transformed),
+               classfile_status_message(cause));
+    check("inserted the call", transformed == TRANSFORM_OK);
+    check("the target gained no method", cf->methods.count == before);
+
+    u1 *rewritten = NULL;
+    size_t rewritten_size = 0;
+    const classfile_status serialized = classfile_serialize(cf, &rewritten, &rewritten_size);
+    classFile_destroy(cf);
+    if (serialized != CLASSFILE_OK)
+        return 1;
+
+    jvmtiClassDefinition definition;
+    definition.klass = target;
+    definition.class_byte_count = (jint)rewritten_size;
+    definition.class_bytes = rewritten;
+    const jvmtiError redefined = (*jvmti)->RedefineClasses(jvmti, 1, &definition);
+    free(rewritten);
     check("RedefineClasses with the flag off", redefined == JVMTI_ERROR_NONE);
 
     return failures;

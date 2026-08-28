@@ -7,6 +7,7 @@
 public class BridgeTest {
 
     static native int run(Class<?> target, String bridgeClassFile);
+    static native int runHandles(Class<?> target, String bridgeClassFile);
     static native int reports();
     static native int reportedId();
     static native int reportedValue();
@@ -54,6 +55,18 @@ public class BridgeTest {
         // scale(3) = 30 in Java, plus "abcd".length() = 4
         check("a value the bridge computed in Java", reportedValue(), 34);
         check("a label the bridge read off the receiver", reportedLabel(), "overlay");
+
+        System.out.println("\n== the same thing without naming the target anywhere ==");
+
+        // HandleBridge was compiled with the target absent from the class path.
+        BridgeTarget second = new BridgeTarget("second");
+        failures += runHandles(BridgeTarget.class, args[2]);
+
+        check("the original body still returns its value", second.work(3, "abcd"), 34);
+        check("the name-free bridge ran", Class.forName("HandleBridge")
+                                              .getField("enters").getInt(null), 1);
+        check("it called through the bound handle", reportedValue(), 34);
+        check("identifier", reportedId(), 9);
 
         shutdown();
 
