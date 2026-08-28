@@ -289,10 +289,8 @@ static bool bind_by_slot(JNIEnv *env, jclass target, jclass bridge)
     return true;
 }
 
-JNIEXPORT jint JNICALL Java_BridgeTest_runHandles(JNIEnv *env, jclass unused, jclass target,
-                                                  jstring bridge_path)
+static jint install_handle_bridge(JNIEnv *env, jclass target, jstring bridge_path)
 {
-    (void)unused;
     failures = 0;
 
     const char *path = (*env)->GetStringUTFChars(env, bridge_path, NULL);
@@ -335,6 +333,24 @@ JNIEXPORT jint JNICALL Java_BridgeTest_runHandles(JNIEnv *env, jclass unused, jc
     if ((*env)->ExceptionCheck(env))
         (*env)->ExceptionClear(env);
 
+    char *class_name = jvm_class_name_of(target);
+    jvmtiError capture = JVMTI_ERROR_NONE;
+    const bool captured = class_name != NULL && class_cache_ensure(target, class_name, &capture);
+    check("captured the original bytes", captured);
+    /* Printed because it is what made a wrong capture visible once: the bytes
+       came back the right size for some other class entirely. */
+    printf("      target is %s, capture said jvmti %d\n",
+           class_name != NULL ? class_name : "<null>", (int)capture);
+    {
+        jint captured_size = 0;
+        const unsigned char *bytes = class_cache_get(env, target, &captured_size);
+        printf("      cached %d bytes for it\n", bytes != NULL ? (int)captured_size : -1);
+    }
+    free(class_name);
+
+    bool previous = false;
+    vm_structs_set_bool_flag("AllowRedefinitionToAddDeleteMethods", false, &previous);
+
     check("bound the target's method by slot, never by name",
           bind_by_slot(env, target, bridge_class));
 
@@ -373,6 +389,49 @@ JNIEXPORT jint JNICALL Java_BridgeTest_runHandles(JNIEnv *env, jclass unused, jc
     check("RedefineClasses with the flag off", redefined == JVMTI_ERROR_NONE);
 
     return failures;
+}
+
+JNIEXPORT jint JNICALL Java_BridgeTest_runHandles(JNIEnv *env, jclass unused, jclass target,
+                                                  jstring bridge_path)
+{
+    (void)unused;
+    return install_handle_bridge(env, target, bridge_path);
+}
+
+/* The same installation against a target that is not where the easy test put
+   it: behind a class loader of its own, or inside a named module. */
+JNIEXPORT jint JNICALL Java_LoaderCasesTest_install(JNIEnv *env, jclass unused, jclass target,
+                                                    jstring bridge_path)
+{
+    (void)unused;
+    const jni2hook_status init = JNI2Hook_InitFromRunningVm();
+    if (init != JNI2HOOK_OK)
+    {
+        printf("  JNI2Hook_Init failed: %s\n", JNI2Hook_StatusMessage(init));
+        return 1;
+    }
+    return install_handle_bridge(env, target, bridge_path);
+}
+
+JNIEXPORT jint JNICALL Java_LoaderCasesTest_reports(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    return g_reports;
+}
+
+JNIEXPORT jint JNICALL Java_LoaderCasesTest_reportedValue(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    return g_value;
+}
+
+JNIEXPORT void JNICALL Java_LoaderCasesTest_shutdown(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    JNI2Hook_Shutdown();
 }
 
 JNIEXPORT jint JNICALL Java_BridgeTest_reports(JNIEnv *env, jclass unused)

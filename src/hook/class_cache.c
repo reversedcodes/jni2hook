@@ -147,14 +147,22 @@ static void JNICALL on_class_file_load(jvmtiEnv *jvmti,
 
     lock_cache();
 
-    /* Matching on class_being_redefined rather than on the name: the retransform
-       we asked for names exactly one class, and two loaders may well have a
-       class of the same name. */
-    if (g_capture_class != NULL &&
+    /* Both halves are needed, and each covers what the other cannot.
+     *
+     * The name alone is not an identity: two loaders may each define a class of
+     * that name, and a modded game has plenty of loaders.
+     *
+     * class_being_redefined alone is worse. A class loaded while a retransform
+     * is in flight is reported with class_being_redefined still pointing at the
+     * class being retransformed, not NULL -- java/lang/Module$ReflectionData
+     * arrives that way in the middle of retransforming a class in a named
+     * module. Matching on identity alone therefore cached a JDK class's bytes
+     * under our target and the original body was gone for good. */
+    if (g_capture_class != NULL && name != NULL && g_capture_name != NULL &&
+        strcmp(name, g_capture_name) == 0 &&
         (*env)->IsSameObject(env, class_being_redefined, g_capture_class) == JNI_TRUE)
     {
-        const char *stored_name = name != NULL ? name : g_capture_name;
-        if (store(env, class_being_redefined, stored_name, class_data, class_data_len))
+        if (store(env, class_being_redefined, name, class_data, class_data_len))
             g_captured = true;
     }
 

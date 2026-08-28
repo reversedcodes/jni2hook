@@ -132,6 +132,12 @@ if(JNI2HOOK_BUILD_TESTS)
                 SKIP_RETURN_CODE 2
                 ENVIRONMENT "TRANSFORM=$<TARGET_FILE:j2h_transform>;WORK=${CMAKE_CURRENT_BINARY_DIR}/insert-offsets")
 
+            add_test(NAME loader_cases
+                COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_loader_cases.sh)
+            set_tests_properties(loader_cases PROPERTIES
+                SKIP_RETURN_CODE 2
+                ENVIRONMENT "BRIDGE_LIBRARY=$<TARGET_FILE:j2h_java_bridge>;WORK=${CMAKE_CURRENT_BINARY_DIR}/loader-cases")
+
             add_test(NAME shift_semantics
                 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_shift_semantics.sh)
             set_tests_properties(shift_semantics PROPERTIES
