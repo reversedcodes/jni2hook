@@ -48,6 +48,7 @@ add_library(jni2hook STATIC
     src/visitors/instruction.c
     src/visitors/member_info.c
     src/visitors/stack_map_table.c
+    src/visitors/type_annotation.c
     src/visitors/visitor.c
 )
 
@@ -113,6 +114,25 @@ if(JNI2HOOK_BUILD_TESTS)
                 -DUTILS_API=$<TARGET_FILE:j2h_utils_api>
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/classfile_smoke.cmake
         )
+
+        # An insertion at offset 0 shifts everything by the same amount and
+        # never lands on a reference. These two cover the interior offsets,
+        # where a branch target, a frame or an exception bound sits exactly on
+        # the insertion point: one asks the JVM whether the result still
+        # verifies, the other asserts where each reference ended up, which is
+        # the part a verifier cannot see.
+        if(UNIX)
+            add_test(NAME insert_offsets
+                COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_insert_offsets.sh)
+            set_tests_properties(insert_offsets PROPERTIES
+                ENVIRONMENT "TRANSFORM=$<TARGET_FILE:j2h_transform>;WORK=${CMAKE_CURRENT_BINARY_DIR}/insert-offsets")
+
+            add_test(NAME shift_semantics
+                COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_shift_semantics.sh)
+            set_tests_properties(shift_semantics PROPERTIES
+                ENVIRONMENT "TRANSFORM=$<TARGET_FILE:j2h_transform>;CLASSES=${CMAKE_CURRENT_BINARY_DIR}/insert-offsets/src")
+            set_tests_properties(shift_semantics PROPERTIES DEPENDS insert_offsets)
+        endif()
     endif()
 
     add_library(j2h_runtime_test SHARED tests/runtime/hook_runtime.c)

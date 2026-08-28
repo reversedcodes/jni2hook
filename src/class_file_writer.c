@@ -2,7 +2,7 @@
 
 #include "jni2hook/utils/byte_stream.h"
 
-static void write_constant_pool(byte_buffer *b, const constant_pool *pool)
+static classfile_status write_constant_pool(byte_buffer *b, const constant_pool *pool)
 {
     byte_buffer_u2(b, pool->count);
 
@@ -58,10 +58,14 @@ static void write_constant_pool(byte_buffer *b, const constant_pool *pool)
             byte_buffer_u2(b, entry->u.dynamic.nat_index);
             break;
         default:
-            b->ok = false;
-            return;
+            /* Only reachable on a tree the caller built by hand: parsing
+               rejects an unknown tag outright. Reporting it as out of memory
+               sent everyone looking in the wrong place. */
+            return CLASSFILE_ERR_UNSUPPORTED;
         }
     }
+
+    return CLASSFILE_OK;
 }
 
 static void write_attributes(byte_buffer *b, const attribute_list *list)
@@ -100,7 +104,12 @@ classfile_status classfile_serialize(const ClassFile *cf, u1 **out, size_t *out_
     byte_buffer_u2(&b, cf->minor_version);
     byte_buffer_u2(&b, cf->major_version);
 
-    write_constant_pool(&b, &cf->constant_pool);
+    const classfile_status pool_status = write_constant_pool(&b, &cf->constant_pool);
+    if (pool_status != CLASSFILE_OK)
+    {
+        byte_buffer_free(&b);
+        return pool_status;
+    }
 
     byte_buffer_u2(&b, cf->access_flags);
     byte_buffer_u2(&b, cf->this_class);

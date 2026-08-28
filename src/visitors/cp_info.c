@@ -204,7 +204,12 @@ classfile_status constant_pool_read(byte_cursor *c, constant_pool *pool)
             if (value == NULL)
                 return CLASSFILE_ERR_TRUNCATED;
             memcpy(entry->u.numeric.bytes, value, 8);
-            /* JVMS 4.4.5: the following slot stays empty and is unusable. */
+            /* JVMS 4.4.5: the following slot stays empty and is unusable, which
+               also means it has to exist. A Long in the last slot leaves the
+               pool one entry short, and constant_pool_append would later hand
+               that very index out and shift every later index the JVM reads. */
+            if ((u4)i + 1u >= (u4)count)
+                return CLASSFILE_ERR_CONSTANT_INDEX;
             i++;
             break;
         }

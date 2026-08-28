@@ -4,10 +4,11 @@
 #include "code_attribute.h"
 #include "instruction.h"
 #include "stack_map_table.h"
+#include "type_annotation.h"
 
 /* A Code attribute taken apart far enough to insert instructions into it.
  *
- * Five separate structures point into the bytecode by offset, and every one of
+ * Six separate structures point into the bytecode by offset, and every one of
  * them has to follow when something is inserted:
  *
  *   branches and switches   inside the instruction list itself
@@ -15,6 +16,7 @@
  *   LineNumberTable         start_pc per entry
  *   LocalVariableTable      start_pc plus a length, so a span, not a point
  *   StackMapTable           the frame chain, and Uninitialized entries
+ *   type annotations        localvar, offset and type_argument targets
  *
  * Rather than adding a delta to each of them, every reference is turned into
  * the index of the instruction it names, the list is spliced, the offsets are
@@ -22,9 +24,24 @@
  * much the code grew, which matters because it does not grow by a fixed amount:
  * a switch changes length when its padding shifts.
  *
- * A reference to the offset being inserted at ends up on the first inserted
- * instruction, so a jump to that point runs the inserted code. That is what
- * makes a hook at an interior offset fire on every path reaching it. */
+ * Two kinds of reference behave differently at the insertion point itself, and
+ * getting that wrong is a VerifyError rather than a subtlety:
+ *
+ *   A reference that names a *position* — a branch or switch target, a
+ *   StackMapTable frame, an exception range bound or handler, a line number, a
+ *   local variable scope — stays where it is, so it now names the first
+ *   inserted instruction. A jump to that offset therefore runs the inserted
+ *   code, which is what makes a hook at an interior offset fire on every path
+ *   reaching it, and it keeps the frame paired with the branch target.
+ *
+ *   A reference that names a specific *instruction* — a StackMapTable
+ *   Uninitialized entry naming its new, an offset_target or
+ *   type_argument_target naming the instruction it annotates — moves with that
+ *   instruction instead, because it has to keep naming the same opcode.
+ *
+ * JVMS allows LineNumberTable, LocalVariableTable and LocalVariableTypeTable to
+ * appear more than once on a Code attribute. Repeated tables are read into one
+ * table here and written back as one, which the JVM treats identically. */
 
 typedef struct
 {
@@ -68,6 +85,7 @@ typedef struct
     stack_map_table       stack_map;
 
     attribute_list        other_attributes;
+    type_annotation_refs  type_annotations;
 } code_editor;
 
 void code_editor_init(code_editor *editor);

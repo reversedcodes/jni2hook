@@ -3,6 +3,8 @@
 
 #include "visitor.h"
 
+#include <stdint.h>
+
 /* A decoded bytecode instruction, JVMS chapter 6.
  *
  * Branch targets are kept as absolute offsets into the method rather than as
@@ -109,6 +111,14 @@ typedef struct
 
 operand_kind instruction_kind_of(u1 opcode);
 void instruction_free(instruction *node);
+
+/* False for the three opcodes JVMS 6.2 reserves for the VM. They may not appear
+   in a class file, and they sit past the end of the opcode length table. */
+bool instruction_opcode_is_defined(u1 opcode);
+
+/* Entry count of a tableswitch or lookupswitch, computed wide enough that a
+   malformed low/high pair cannot overflow. Zero for anything else. */
+u4 instruction_switch_entries(const instruction *node);
 
 /* Encoded length at a given offset. The offset matters only for the two
    switches, whose padding depends on where they land. */

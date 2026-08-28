@@ -495,12 +495,12 @@ static void propagate(trace_state *states, u4 target, const trace_work *work,
     }
 }
 
-bool constructor_init_offset(const ClassFile *cf, const code_editor *editor,
-                             u4 *out_offset)
+constructor_init_result constructor_init_offset(const ClassFile *cf, const code_editor *editor,
+                                                u4 *out_offset)
 {
     if (cf == NULL || editor == NULL || out_offset == NULL ||
         editor->instructions.count == 0 || editor->max_locals == 0)
-        return false;
+        return CONSTRUCTOR_INIT_MISSING;
 
     const u4 count = editor->instructions.count;
     trace_state *states = calloc(count, sizeof(*states));
@@ -513,7 +513,7 @@ bool constructor_init_offset(const ClassFile *cf, const code_editor *editor,
         free(queue);
         free(locals);
         free(stack);
-        return false;
+        return CONSTRUCTOR_INIT_MISSING;
     }
 
     memset(locals, TRACE_OTHER, editor->max_locals);
@@ -525,7 +525,7 @@ bool constructor_init_offset(const ClassFile *cf, const code_editor *editor,
         free(queue);
         free(locals);
         free(stack);
-        return false;
+        return CONSTRUCTOR_INIT_MISSING;
     }
     queue[0] = 0;
     states[0].queued = true;
@@ -533,6 +533,7 @@ bool constructor_init_offset(const ClassFile *cf, const code_editor *editor,
     u4 tail = 1u % count;
     u4 pending = 1;
     bool found = false;
+    bool ambiguous = false;
     u4 found_offset = 0;
 
     while (pending != 0)
@@ -553,10 +554,17 @@ bool constructor_init_offset(const ClassFile *cf, const code_editor *editor,
             work.depth > arguments && work.stack[work.depth - arguments - 1u] == TRACE_THIS)
         {
             const u4 after = node->offset + instruction_length_at(node, node->offset);
-            if (!found || after < found_offset)
+            if (!found)
             {
                 found = true;
                 found_offset = after;
+            }
+            else if (after != found_offset)
+            {
+                /* A second, different initialising call means the paths do not
+                   share one point after which this is initialised. Reported
+                   rather than silently instrumenting whichever came first. */
+                ambiguous = true;
             }
             continue;
         }
@@ -617,7 +625,12 @@ bool constructor_init_offset(const ClassFile *cf, const code_editor *editor,
     free(queue);
     free(locals);
     free(stack);
-    if (found)
-        *out_offset = found_offset;
-    return found;
+
+    if (ambiguous)
+        return CONSTRUCTOR_INIT_AMBIGUOUS;
+    if (!found)
+        return CONSTRUCTOR_INIT_MISSING;
+
+    *out_offset = found_offset;
+    return CONSTRUCTOR_INIT_FOUND;
 }

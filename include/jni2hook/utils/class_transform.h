@@ -31,7 +31,8 @@ typedef enum
    TRANSFORM_ERR_NO_CODE,
    TRANSFORM_ERR_NAME_IN_USE,
    TRANSFORM_ERR_CLASSFILE,
-   TRANSFORM_ERR_BAD_OFFSET
+   TRANSFORM_ERR_BAD_OFFSET,
+   TRANSFORM_ERR_AMBIGUOUS_INIT
 } transform_status;
 
 const char *transform_status_message(transform_status status);
