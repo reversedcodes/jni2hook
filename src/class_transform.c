@@ -29,6 +29,8 @@ const char *transform_status_message(transform_status status)
         return "class file operation failed";
     case TRANSFORM_ERR_BAD_OFFSET:
         return "the offset is not an instruction boundary";
+    case TRANSFORM_ERR_AMBIGUOUS_INIT:
+        return "this constructor initializes this on more than one path";
     }
     return "unknown error";
 }
@@ -159,13 +161,26 @@ transform_status class_transform_restore(ClassFile *cf,
     if (status != CLASSFILE_OK)
         return fail(status, out_cause);
 
+    const u2 restored_index = (u2)(cf->methods.items[index].attributes.count - 1);
+
     /* The append may have moved the attribute list, so resolve the source again. */
     code = attribute_list_find(&cf->methods.items[copy_index].attributes,
                                &cf->constant_pool, "Code");
+    if (code == NULL)
+    {
+        attribute_list_remove(&cf->methods.items[index].attributes, restored_index);
+        return TRANSFORM_ERR_NO_CODE;
+    }
+
     restored->attribute_name_index = code->attribute_name_index;
     status = attribute_info_set_info(restored, code->info, code->attribute_length);
     if (status != CLASSFILE_OK)
+    {
+        /* Otherwise the method keeps an empty Code attribute and the class is
+           left in a state that only fails much later, at link time. */
+        attribute_list_remove(&cf->methods.items[index].attributes, restored_index);
         return fail(status, out_cause);
+    }
 
     member_info_set_native(&cf->methods.items[index], false);
     member_list_remove(&cf->methods, copy_index);
@@ -225,24 +240,43 @@ transform_status class_transform_insert_call(ClassFile *cf,
     if (status != CLASSFILE_OK)
         return fail(status, out_cause);
 
-    /* Interning may have reallocated the pool, but the Code attribute lives in
-       the method list, which was not touched. Look it up again anyway so that a
-       later change to the interning path cannot leave a stale pointer here. */
+    /* The callee is declared before its call site is written. Doing it the
+       other way round left a body invoking a method that does not exist if the
+       append then failed, and that only surfaces when the class is linked. */
+    member_info *hook = NULL;
+    status = member_list_append(&cf->methods, &hook);
+    if (status != CLASSFILE_OK)
+        return fail(status, out_cause);
+
+    const u2 hook_index = (u2)(cf->methods.count - 1);
+    hook->access_flags = (u2)(JVM_ACC_PRIVATE | JVM_ACC_FINAL | JVM_ACC_NATIVE |
+                              (is_static ? JVM_ACC_STATIC : 0));
+    hook->name_index = hook_name_index;
+    hook->descriptor_index = void_index;
+
+    /* Interning and the append may have reallocated the pool and the method
+       list, so the Code attribute is resolved again from the index. */
     code = attribute_list_find(&cf->methods.items[index].attributes,
                                &cf->constant_pool, "Code");
 
     code_editor editor;
     status = code_editor_load(code, &cf->constant_pool, &editor);
     if (status != CLASSFILE_OK)
+    {
+        member_list_remove(&cf->methods, hook_index);
         return fail(status, out_cause);
+    }
 
     if (is_constructor)
     {
         u4 safe_offset = 0;
-        if (!constructor_init_offset(cf, &editor, &safe_offset))
+        const constructor_init_result init = constructor_init_offset(cf, &editor, &safe_offset);
+        if (init != CONSTRUCTOR_INIT_FOUND)
         {
             code_editor_free(&editor);
-            return TRANSFORM_ERR_INITIALIZER;
+            member_list_remove(&cf->methods, hook_index);
+            return init == CONSTRUCTOR_INIT_AMBIGUOUS ? TRANSFORM_ERR_AMBIGUOUS_INIT
+                                                      : TRANSFORM_ERR_INITIALIZER;
         }
         if (at_offset < safe_offset)
             at_offset = safe_offset;
@@ -264,27 +298,16 @@ transform_status class_transform_insert_call(ClassFile *cf,
     count++;
 
     status = code_editor_insert(&editor, at_offset, nodes, count, 1);
+    if (status == CLASSFILE_OK)
+        status = code_editor_store(&editor, code);
+    code_editor_free(&editor);
+
     if (status != CLASSFILE_OK)
     {
-        code_editor_free(&editor);
-        return status == CLASSFILE_ERR_CONSTANT_INDEX ? TRANSFORM_ERR_BAD_OFFSET
-                                                      : fail(status, out_cause);
+        member_list_remove(&cf->methods, hook_index);
+        return status == CLASSFILE_ERR_BAD_OFFSET ? TRANSFORM_ERR_BAD_OFFSET
+                                                  : fail(status, out_cause);
     }
-
-    status = code_editor_store(&editor, code);
-    code_editor_free(&editor);
-    if (status != CLASSFILE_OK)
-        return fail(status, out_cause);
-
-    member_info *hook = NULL;
-    status = member_list_append(&cf->methods, &hook);
-    if (status != CLASSFILE_OK)
-        return fail(status, out_cause);
-
-    hook->access_flags = (u2)(JVM_ACC_PRIVATE | JVM_ACC_FINAL | JVM_ACC_NATIVE |
-                              (is_static ? JVM_ACC_STATIC : 0));
-    hook->name_index = hook_name_index;
-    hook->descriptor_index = void_index;
 
     return TRANSFORM_OK;
 }

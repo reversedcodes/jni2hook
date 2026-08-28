@@ -22,6 +22,16 @@ const char *classfile_status_message(classfile_status status)
         return "class file limit exceeded";
     case CLASSFILE_ERR_OUT_OF_MEMORY:
         return "out of memory";
+    case CLASSFILE_ERR_OPCODE:
+        return "reserved or unknown opcode in the code array";
+    case CLASSFILE_ERR_BAD_OFFSET:
+        return "the offset is not an instruction boundary";
+    case CLASSFILE_ERR_BRANCH_RANGE:
+        return "a branch no longer reaches its target";
+    case CLASSFILE_ERR_CODE_TOO_LARGE:
+        return "the method body exceeds 65535 bytes";
+    case CLASSFILE_ERR_UNSUPPORTED:
+        return "the structure cannot be written back";
     }
     return "unknown error";
 }

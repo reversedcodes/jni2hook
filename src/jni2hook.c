@@ -105,6 +105,24 @@ int JNI2Hook_ForcedRedefinitionFlag(void)
     return g_flag_state;
 }
 
+/* g_lock is created by JNI2Hook_Init, so it may only be taken once Init has
+   run at least once. g_initialized is read unlocked first for exactly that
+   reason: it is false before Init and stays true from the moment the lock
+   exists until Shutdown, and every caller re-checks it under the lock, which is
+   what actually closes the race against a concurrent Shutdown. */
+static bool lock_if_initialized(void)
+{
+    if (!g_initialized)
+        return false;
+
+    hook_mutex_lock(&g_lock);
+    if (g_initialized)
+        return true;
+
+    hook_mutex_unlock(&g_lock);
+    return false;
+}
+
 static jni2hook_status jvmti_failed(jvmtiError error)
 {
     g_last_error = error;
@@ -122,11 +140,17 @@ static char *duplicate(const char *text)
     return copy;
 }
 
-static hooked_class *find_class(const char *class_name)
+/* Keyed on the class itself, not on its binary name: two loaders may each
+   define a class of that name, and picking the wrong one here would redefine a
+   class nobody asked about and bind natives into it. */
+static hooked_class *find_class(JNIEnv *env, jclass klass)
 {
+    if (env == NULL || klass == NULL)
+        return NULL;
+
     for (size_t i = 0; i < g_class_count; i++)
     {
-        if (strcmp(g_classes[i].class_name, class_name) == 0)
+        if ((*env)->IsSameObject(env, g_classes[i].klass, klass) == JNI_TRUE)
             return &g_classes[i];
     }
     return NULL;
@@ -204,6 +228,7 @@ static void drop_class(hooked_class *target)
 typedef struct
 {
     jthread *threads;
+    jvmtiError *results;
     jint count;
 } suspended_set;
 
@@ -214,6 +239,7 @@ typedef struct
 static void suspend_others(suspended_set *set)
 {
     set->threads = NULL;
+    set->results = NULL;
     set->count = 0;
 
     jvmtiEnv *jvmti = jvm_jvmti();
@@ -239,44 +265,50 @@ static void suspend_others(suspended_set *set)
         threads[kept++] = threads[i];
     }
 
-    if (kept > 0)
+    set->threads = threads;
+    if (kept <= 0)
+        return;
+
+    /* The result array is allocated here and kept for the resume. Allocating it
+       again on the way out would mean a failure at that point leaves every
+       thread this call suspended, permanently. */
+    jvmtiError *results = malloc((size_t)kept * sizeof(*results));
+    if (results == NULL)
+        return;
+
+    for (jint i = 0; i < kept; i++)
+        results[i] = JVMTI_ERROR_INTERNAL;
+
+    (*jvmti)->SuspendThreadList(jvmti, kept, threads, results);
+
+    /* SuspendThreadList reports per thread, and only the ones it actually
+       suspended may be resumed. A thread that came back
+       JVMTI_ERROR_THREAD_SUSPENDED was already suspended by someone else and
+       resuming it would be undoing their work. */
+    jint suspended = 0;
+    for (jint i = 0; i < kept; i++)
     {
-        jvmtiError *results = malloc((size_t)kept * sizeof(*results));
-        if (results != NULL)
-        {
-            (*jvmti)->SuspendThreadList(jvmti, kept, threads, results);
-            free(results);
-        }
-        else
-        {
-            kept = 0;
-        }
+        if (results[i] == JVMTI_ERROR_NONE)
+            threads[suspended++] = threads[i];
     }
 
-    set->threads = threads;
-    set->count = kept;
+    set->results = results;
+    set->count = suspended;
 }
 
 static void resume_others(suspended_set *set)
 {
     jvmtiEnv *jvmti = jvm_jvmti();
-    if (jvmti == NULL)
-        return;
 
-    if (set->count > 0)
-    {
-        jvmtiError *results = malloc((size_t)set->count * sizeof(*results));
-        if (results != NULL)
-        {
-            (*jvmti)->ResumeThreadList(jvmti, set->count, set->threads, results);
-            free(results);
-        }
-    }
+    if (jvmti != NULL && set->count > 0 && set->results != NULL)
+        (*jvmti)->ResumeThreadList(jvmti, set->count, set->threads, set->results);
 
-    if (set->threads != NULL)
+    free(set->results);
+    if (jvmti != NULL && set->threads != NULL)
         (*jvmti)->Deallocate(jvmti, (unsigned char *)set->threads);
 
     set->threads = NULL;
+    set->results = NULL;
     set->count = 0;
 }
 
@@ -315,7 +347,7 @@ static jni2hook_status reapply(hooked_class *target)
         return JNI2HOOK_ERR_NO_JNI;
 
     jint original_size = 0;
-    const unsigned char *original_bytes = class_cache_get(target->class_name, &original_size);
+    const unsigned char *original_bytes = class_cache_get(env, target->klass, &original_size);
     if (original_bytes == NULL)
         return JNI2HOOK_ERR_CLASS_NOT_CACHED;
 
@@ -430,6 +462,10 @@ static jni2hook_status reapply(hooked_class *target)
     }
     else
     {
+        /* Every binding is attempted even after one fails. Stopping at the
+           first left the methods behind it native and unbound, so any thread
+           reaching one of them got an UnsatisfiedLinkError on top of whatever
+           went wrong here. The first failure is what gets reported. */
         for (size_t i = 0; i < target->count; i++)
         {
             hook_entry *entry = &target->hooks[i];
@@ -442,8 +478,9 @@ static jni2hook_status reapply(hooked_class *target)
             if ((*env)->RegisterNatives(env, target->klass, &binding, 1) < 0)
             {
                 jvm_clear_exception(env);
-                result = JNI2HOOK_ERR_JNI;
-                break;
+                if (result == JNI2HOOK_OK)
+                    result = JNI2HOOK_ERR_JNI;
+                continue;
             }
 
             if (entry->kind == HOOK_MAKE_NATIVE)
@@ -457,8 +494,8 @@ static jni2hook_status reapply(hooked_class *target)
                 if (entry->original == NULL)
                 {
                     jvm_clear_exception(env);
-                    result = JNI2HOOK_ERR_JNI;
-                    break;
+                    if (result == JNI2HOOK_OK)
+                        result = JNI2HOOK_ERR_JNI;
                 }
             }
         }
@@ -572,8 +609,9 @@ jni2hook_status JNI2Hook_InitFromRunningVm(void)
 
 jni2hook_status JNI2Hook_Attach(JNIEnv **out_env)
 {
-    if (!g_initialized)
+    if (!lock_if_initialized())
         return JNI2HOOK_ERR_NOT_INITIALIZED;
+    hook_mutex_unlock(&g_lock);
 
     JNIEnv *env = jvm_env();
     if (env == NULL)
@@ -587,15 +625,19 @@ jni2hook_status JNI2Hook_Attach(JNIEnv **out_env)
 static jni2hook_status install(jmethodID method, uint32_t bytecode_offset, void *native_function,
                                jmethodID *out_original, hook_kind kind)
 {
-    if (!g_initialized)
-        return JNI2HOOK_ERR_NOT_INITIALIZED;
     if (method == NULL || native_function == NULL)
         return JNI2HOOK_ERR_TRANSFORM;
 
-    hook_mutex_lock(&g_lock);
+    if (!lock_if_initialized())
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
 
     jvmtiEnv *jvmti = jvm_jvmti();
     JNIEnv *env = jvm_env();
+    if (jvmti == NULL)
+    {
+        hook_mutex_unlock(&g_lock);
+        return JNI2HOOK_ERR_NO_JVMTI;
+    }
     if (env == NULL)
     {
         hook_mutex_unlock(&g_lock);
@@ -677,7 +719,7 @@ static jni2hook_status install(jmethodID method, uint32_t bytecode_offset, void 
         goto done;
     }
 
-    target = find_class(class_name);
+    target = find_class(env, declaring);
     if (target == NULL)
     {
         if (g_class_count == g_class_cap)
@@ -776,12 +818,11 @@ jni2hook_status JNI2Hook_InstallAt(jmethodID method, uint32_t bytecode_offset,
 static jni2hook_status find_method(jclass target, const char *pattern, jmethodID *out_method,
                                    uint32_t *out_bytecode_offset, jni2hook_search_stats *out_stats)
 {
-    if (!g_initialized)
-        return JNI2HOOK_ERR_NOT_INITIALIZED;
     if (pattern == NULL || out_method == NULL || out_bytecode_offset == NULL)
         return JNI2HOOK_ERR_INVALID_PATTERN;
 
-    hook_mutex_lock(&g_lock);
+    if (!lock_if_initialized())
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
 
     JNIEnv *env = jvm_env();
     jvmtiEnv *jvmti = jvm_jvmti();
@@ -825,12 +866,21 @@ jni2hook_status JNI2Hook_FindMethodInClass(jclass target, const char *pattern,
     return find_method(target, pattern, out_method, out_bytecode_offset, NULL);
 }
 
-jni2hook_status JNI2Hook_Uninstall(jmethodID method)
-{
-    if (!g_initialized)
-        return JNI2HOOK_ERR_NOT_INITIALIZED;
+/* Removes every entry the predicate picks out and rebuilds the class from the
+   cached original without them.
 
-    hook_mutex_lock(&g_lock);
+   The entries are moved out of the way, not freed. Until RedefineClasses has
+   actually put the body back, the VM is still running the hooked class, and the
+   registry has to keep saying so: freeing first meant a failed rebuild left the
+   detour live while JNI2Hook_IsInstalled reported it gone, with nothing left to
+   retry from. */
+typedef bool (*hook_predicate)(const hook_entry *entry, const void *context);
+
+static jni2hook_status uninstall_matching(jmethodID method, hook_predicate matches,
+                                          const void *context)
+{
+    if (!lock_if_initialized())
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
 
     hooked_class *target = find_class_of_method(method, NULL);
     if (target == NULL)
@@ -839,54 +889,115 @@ jni2hook_status JNI2Hook_Uninstall(jmethodID method)
         return JNI2HOOK_ERR_NOT_HOOKED;
     }
 
+    const size_t original = target->count;
     size_t kept = 0;
-    for (size_t i = 0; i < target->count; i++)
+    for (size_t i = 0; i < original; i++)
     {
-        if (target->hooks[i].method == method)
-        {
-            free_entry(&target->hooks[i]);
+        if (matches(&target->hooks[i], context))
             continue;
-        }
         if (kept != i)
+        {
+            const hook_entry moved = target->hooks[kept];
             target->hooks[kept] = target->hooks[i];
+            target->hooks[i] = moved;
+        }
         kept++;
     }
-    target->count = kept;
 
+    if (kept == original)
+    {
+        hook_mutex_unlock(&g_lock);
+        return JNI2HOOK_ERR_NOT_HOOKED;
+    }
+
+    target->count = kept;
     const jni2hook_status result = reapply(target);
+
+    if (result != JNI2HOOK_OK)
+    {
+        target->count = original;
+        hook_mutex_unlock(&g_lock);
+        return result;
+    }
+
+    for (size_t i = kept; i < original; i++)
+        free_entry(&target->hooks[i]);
 
     if (target->count == 0)
         drop_class(target);
 
     hook_mutex_unlock(&g_lock);
-    return result;
+    return JNI2HOOK_OK;
+}
+
+static bool matches_method(const hook_entry *entry, const void *context)
+{
+    return entry->method == (jmethodID)context;
+}
+
+typedef struct
+{
+    jmethodID method;
+    uint32_t bytecode_offset;
+    void *native_function;
+} insert_key;
+
+static bool matches_insert(const hook_entry *entry, const void *context)
+{
+    const insert_key *key = context;
+    return entry->kind == HOOK_INSERT_CALL && entry->method == key->method &&
+           entry->bytecode_offset == key->bytecode_offset &&
+           entry->native_function == key->native_function;
+}
+
+jni2hook_status JNI2Hook_Uninstall(jmethodID method)
+{
+    return uninstall_matching(method, matches_method, method);
+}
+
+jni2hook_status JNI2Hook_UninstallAt(jmethodID method, uint32_t bytecode_offset,
+                                     void *native_function)
+{
+    if (method == NULL || native_function == NULL)
+        return JNI2HOOK_ERR_NOT_HOOKED;
+
+    const insert_key key = {method, bytecode_offset, native_function};
+    return uninstall_matching(method, matches_insert, &key);
 }
 
 int JNI2Hook_IsInstalled(jmethodID method)
 {
-    if (!g_initialized)
+    if (!lock_if_initialized())
         return 0;
 
-    hook_mutex_lock(&g_lock);
     const int installed = find_class_of_method(method, NULL) != NULL;
     hook_mutex_unlock(&g_lock);
     return installed;
 }
 
-void JNI2Hook_Shutdown(void)
+jni2hook_status JNI2Hook_Shutdown(void)
 {
-    if (!g_initialized)
-        return;
+    if (!lock_if_initialized())
+        return JNI2HOOK_OK;
 
-    hook_mutex_lock(&g_lock);
+    /* Every class is restored, and the first failure is remembered and handed
+       back. A caller that is about to unload the library needs to know that a
+       class it hooked is still native and still bound into code that is about
+       to be unmapped, which the old void signature could not tell it. */
+    jni2hook_status result = JNI2HOOK_OK;
 
     while (g_class_count > 0)
     {
         hooked_class *target = &g_classes[g_class_count - 1];
-        for (size_t i = 0; i < target->count; i++)
-            free_entry(&target->hooks[i]);
+        const size_t count = target->count;
+
         target->count = 0;
-        reapply(target);
+        const jni2hook_status restored = reapply(target);
+        if (restored != JNI2HOOK_OK && result == JNI2HOOK_OK)
+            result = restored;
+
+        for (size_t i = 0; i < count; i++)
+            free_entry(&target->hooks[i]);
         drop_class(target);
     }
 
@@ -896,32 +1007,50 @@ void JNI2Hook_Shutdown(void)
     g_class_cap = 0;
     g_insert_serial = 0;
 
+    /* Put the VM flag back the way it was found. Leaving a deprecated product
+       flag flipped on outlives the library in the host process. */
+    if (g_flag_state == 1)
+        vm_structs_set_bool_flag("AllowRedefinitionToAddDeleteMethods", false, NULL);
+    g_flag_state = -1;
+
     class_cache_clear();
     class_cache_stop();
     jvm_release();
 
+    g_can_suspend = false;
     g_initialized = false;
     hook_mutex_unlock(&g_lock);
+    return result;
 }
 
 jni2hook_status JNI2Hook_FindFieldInClass(jclass target, const char *pattern,
                                           uint32_t instruction_offset, jfieldID *out_field,
                                           int *out_is_static)
 {
-    if (!g_initialized)
+    if (!lock_if_initialized())
         return JNI2HOOK_ERR_NOT_INITIALIZED;
 
     JNIEnv *env = jvm_env();
     jvmtiEnv *jvmti = jvm_jvmti();
-    if (env == NULL)
-        return JNI2HOOK_ERR_NO_JNI;
-    if (jvmti == NULL)
-        return JNI2HOOK_ERR_NO_JVMTI;
+    jni2hook_status status;
 
-    jvmtiError error = JVMTI_ERROR_NONE;
-    const jni2hook_status status = field_scan_find_in_class(
-        env, jvmti, target, pattern, instruction_offset, out_field, out_is_static, &error);
-    if (status == JNI2HOOK_ERR_JVMTI)
-        g_last_error = error;
+    if (env == NULL)
+    {
+        status = JNI2HOOK_ERR_NO_JNI;
+    }
+    else if (jvmti == NULL)
+    {
+        status = JNI2HOOK_ERR_NO_JVMTI;
+    }
+    else
+    {
+        jvmtiError error = JVMTI_ERROR_NONE;
+        status = field_scan_find_in_class(env, jvmti, target, pattern, instruction_offset,
+                                          out_field, out_is_static, &error);
+        if (status == JNI2HOOK_ERR_JVMTI)
+            g_last_error = error;
+    }
+
+    hook_mutex_unlock(&g_lock);
     return status;
 }

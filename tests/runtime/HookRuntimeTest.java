@@ -13,6 +13,7 @@ public class HookRuntimeTest {
     static native int hookInsertFirst(Class<?> target);
     static native int hookInsertSecond(Class<?> target);
     static native int hookInsertStatic(Class<?> target);
+    static native int unhookInsertSecondOnly(Class<?> target);
     static native int unhookInsert(Class<?> target);
     static native int unhookInsertStatic(Class<?> target);
     static native int hookCtorDirect(Class<?> target);
@@ -175,6 +176,18 @@ public class HookRuntimeTest {
         resetInsertCalls();
         check("inserted calls survive replacement uninstall", o.insertTarget(), 1);
         check("both inserted calls survived replacement uninstall",
+                insertFirstCalls() == 1 && insertSecondCalls() == 1);
+
+        check("uninstall only the call at offset 2", unhookInsertSecondOnly(HookRuntimeTest.class) == 0);
+        resetInsertCalls();
+        check("body still runs after the targeted uninstall", o.insertTarget(), 1);
+        check("the call at offset 0 is untouched", insertFirstCalls(), 1);
+        check("the call at offset 2 is gone", insertSecondCalls(), 0);
+
+        check("reinstall the call at offset 2", hookInsertSecond(HookRuntimeTest.class) == 0);
+        resetInsertCalls();
+        check("both inserted calls run again", o.insertTarget(), 1);
+        check("both fired after reinstall",
                 insertFirstCalls() == 1 && insertSecondCalls() == 1);
 
         check("install static inserted call", hookInsertStatic(HookRuntimeTest.class) == 0);

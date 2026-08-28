@@ -27,12 +27,21 @@ typedef enum
     CLASSFILE_ERR_CONSTANT_INDEX,
     CLASSFILE_ERR_TRAILING_BYTES,
     CLASSFILE_ERR_LIMIT_EXCEEDED,
-    CLASSFILE_ERR_OUT_OF_MEMORY
+    CLASSFILE_ERR_OUT_OF_MEMORY,
+    CLASSFILE_ERR_OPCODE,
+    CLASSFILE_ERR_BAD_OFFSET,
+    CLASSFILE_ERR_BRANCH_RANGE,
+    CLASSFILE_ERR_CODE_TOO_LARGE,
+    CLASSFILE_ERR_UNSUPPORTED
 } classfile_status;
 
 const char *classfile_status_message(classfile_status status);
 
 /* Every count in a class file is a u2, so no list may exceed this. */
 #define CLASSFILE_MAX_COUNT 0xFFFFu
+
+/* JVMS 4.7.3: code_length must be greater than zero and less than 65536, which
+   is also what caps every bytecode offset at a u2. */
+#define JVM_MAX_CODE_LENGTH 65535u
 
 #endif

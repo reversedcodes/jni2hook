@@ -137,13 +137,43 @@ jni2hook_status JNI2Hook_ReadMethodLayout(const unsigned char *class_bytes, size
 void JNI2Hook_FreeMethodLayout(jni2hook_method_layout *layout);
 
 /* Puts the body back and drops any copies or inserted calls for method. Other
-   hooks on the same class stay. */
+   hooks on the same class stay.
+ *
+ * On failure nothing is dropped. The VM is still running the hooked class, so
+ * the registry keeps describing it, JNI2Hook_IsInstalled keeps reporting the
+ * hook, and the call can be retried. Treat a non-OK result as "the detour can
+ * still be entered": a caller that would unload the library on the strength of
+ * this call must not do so until it succeeds.
+ *
+ * Removes every hook registered for that jmethodID, which for a method carrying
+ * several JNI2Hook_InstallAt callbacks means all of them. Use
+ * JNI2Hook_UninstallAt to remove one of them on its own. */
 jni2hook_status JNI2Hook_Uninstall(jmethodID method);
+
+/* Removes the single inserted callback that JNI2Hook_InstallAt registered for
+   this method, offset and function, leaving every other hook on the method in
+   place. The three together are the identity of an inserted call, since the same
+   method may carry several at different offsets and several at the same offset
+   with different functions.
+
+   Fails the same way JNI2Hook_Uninstall does, and with the same consequence: a
+   non-OK result means the callback is still installed and can still be entered. */
+jni2hook_status JNI2Hook_UninstallAt(jmethodID method, uint32_t bytecode_offset,
+                                     void *native_function);
 
 int JNI2Hook_IsInstalled(jmethodID method);
 
-/* Removes every hook and releases the JVMTI environment. */
-void JNI2Hook_Shutdown(void);
+/* Removes every hook, puts AllowRedefinitionToAddDeleteMethods back the way it
+   was found, and releases the JVMTI environment.
+ *
+ * Returns the first failure any of the restores reported, or JNI2HOOK_OK when
+ * every class went back cleanly. Everything is released either way, because the
+ * library is going away, so a non-OK result means a class is still native and
+ * still bound to a function pointer the caller is about to unmap. Do not unload
+ * on that. Note that even JNI2HOOK_OK does not make the note on
+ * JNI2Hook_Install go away: a JIT compiled caller can still arrive afterwards,
+ * and only a trampoline that stays mapped solves that. */
+jni2hook_status JNI2Hook_Shutdown(void);
 
 #ifdef __cplusplus
 }

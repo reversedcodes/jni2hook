@@ -235,6 +235,32 @@ JNIEXPORT jint JNICALL Java_HookRuntimeTest_hookInsertStatic(JNIEnv *env, jclass
                       (void *)detour_insert_static);
 }
 
+/* Removes one of the two inserted callbacks on insertTarget and leaves the
+   other in place, which JNI2Hook_Uninstall cannot express: it is keyed on the
+   jmethodID and takes every hook the method carries. */
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_unhookInsertSecondOnly(JNIEnv *env, jclass unused,
+                                                                   jclass target)
+{
+    (void)unused;
+
+    jmethodID method = (*env)->GetMethodID(env, target, "insertTarget", "()I");
+    if (method == NULL)
+    {
+        (*env)->ExceptionClear(env);
+        return -1;
+    }
+
+    const jni2hook_status status =
+        JNI2Hook_UninstallAt(method, 2, (void *)detour_insert_second);
+    if (status != JNI2HOOK_OK)
+    {
+        fprintf(stderr, "  JNI2Hook_UninstallAt(insertTarget()I@2): %s (jvmti %d)\n",
+                JNI2Hook_StatusMessage(status), (int)JNI2Hook_LastJvmtiError());
+        return (jint)status;
+    }
+    return 0;
+}
+
 JNIEXPORT jint JNICALL Java_HookRuntimeTest_unhookInsert(JNIEnv *env, jclass unused, jclass target)
 {
     (void)unused;

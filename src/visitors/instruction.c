@@ -103,6 +103,30 @@ void instruction_free(instruction *node)
     memset(node, 0, sizeof(*node));
 }
 
+bool instruction_opcode_is_defined(u1 opcode)
+{
+    return opcode <= JVM_OPC_MAX;
+}
+
+/* high - low + 1 has to be computed wider than i4: a malformed tableswitch may
+   carry INT_MIN and INT_MAX, and the subtraction alone would already overflow.
+   Parsing rejects anything that does not fit, so every later caller is safe. */
+u4 instruction_switch_entries(const instruction *node)
+{
+    if (node->kind == OPERAND_TABLE_SWITCH)
+    {
+        const int64_t low = node->u.table_switch.low;
+        const int64_t high = node->u.table_switch.high;
+        if (high < low)
+            return 0u;
+        const int64_t entries = high - low + 1;
+        return entries > (int64_t)JVM_MAX_CODE_LENGTH ? (u4)JVM_MAX_CODE_LENGTH : (u4)entries;
+    }
+    if (node->kind == OPERAND_LOOKUP_SWITCH)
+        return node->u.lookup_switch.count < 0 ? 0u : (u4)node->u.lookup_switch.count;
+    return 0u;
+}
+
 u4 instruction_length_at(const instruction *node, u4 offset)
 {
     static const unsigned char lengths[JVM_OPC_MAX + 1] = JVM_OPCODE_LENGTH_INITIALIZER;
@@ -116,16 +140,17 @@ u4 instruction_length_at(const instruction *node, u4 offset)
     case OPERAND_TABLE_SWITCH:
     {
         const u4 padding = (4u - ((offset + 1u) % 4u)) % 4u;
-        const u4 entries = (u4)(node->u.table_switch.high - node->u.table_switch.low + 1);
-        return 1u + padding + 12u + entries * 4u;
+        return 1u + padding + 12u + instruction_switch_entries(node) * 4u;
     }
     case OPERAND_LOOKUP_SWITCH:
     {
         const u4 padding = (4u - ((offset + 1u) % 4u)) % 4u;
-        return 1u + padding + 8u + (u4)node->u.lookup_switch.count * 8u;
+        return 1u + padding + 8u + instruction_switch_entries(node) * 8u;
     }
     default:
-        return lengths[node->opcode];
+        /* Parsing rejects a reserved opcode, so this only guards a node the
+           caller built by hand. One byte keeps offsets moving forward. */
+        return instruction_opcode_is_defined(node->opcode) ? lengths[node->opcode] : 1u;
     }
 }
 
@@ -213,11 +238,20 @@ classfile_status instruction_list_parse(const u1 *code, u4 code_length, instruct
             node->opcode = byte_cursor_u1(&c);
         }
 
+        /* JVMS 6.2: breakpoint, impdep1 and impdep2 are reserved for the VM and
+           may not appear in a class file. Letting one through would also index
+           the opcode length table past its end. */
+        if (!instruction_opcode_is_defined(node->opcode) || node->opcode == JVM_OPC_wide)
+        {
+            instruction_list_free(out);
+            return byte_cursor_ok(&c) ? CLASSFILE_ERR_OPCODE : CLASSFILE_ERR_TRUNCATED;
+        }
+
         node->kind = instruction_kind_of(node->opcode);
         if (node->wide && node->kind != OPERAND_LOCAL && node->kind != OPERAND_IINC)
         {
             instruction_list_free(out);
-            return CLASSFILE_ERR_TRUNCATED;
+            return CLASSFILE_ERR_OPCODE;
         }
 
         switch (node->kind)
@@ -286,12 +320,16 @@ classfile_status instruction_list_parse(const u1 *code, u4 code_length, instruct
                 return CLASSFILE_ERR_TRUNCATED;
             }
 
-            const u4 entries = (u4)(node->u.table_switch.high - node->u.table_switch.low + 1);
-            if ((size_t)entries * 4u > byte_cursor_remaining(&c))
+            /* Widened deliberately: high and low are attacker controlled and
+               their difference does not have to fit in an i4. */
+            const int64_t span =
+                (int64_t)node->u.table_switch.high - (int64_t)node->u.table_switch.low + 1;
+            if (span * 4 > (int64_t)byte_cursor_remaining(&c))
             {
                 instruction_list_free(out);
                 return CLASSFILE_ERR_TRUNCATED;
             }
+            const u4 entries = (u4)span;
 
             node->u.table_switch.targets = malloc((size_t)entries * sizeof(i4));
             if (node->u.table_switch.targets == NULL)
@@ -385,7 +423,9 @@ classfile_status instruction_list_encode(const instruction_list *list, u1 **out,
     byte_buffer_init(&b);
     byte_buffer_reserve(&b, list->code_length ? list->code_length : 64u);
 
-    for (u4 i = 0; i < list->count; i++)
+    classfile_status status = CLASSFILE_OK;
+
+    for (u4 i = 0; i < list->count && status == CLASSFILE_OK; i++)
     {
         const instruction *node = &list->items[i];
         const u4 offset = (u4)b.size;
@@ -454,12 +494,31 @@ classfile_status instruction_list_encode(const instruction_list *list, u1 **out,
             break;
 
         case OPERAND_BRANCH:
-            byte_buffer_u2(&b, (u2)(node->u.branch.target - (i4)offset));
+        {
+            /* The 16 bit form is all a plain branch has. Widening to goto_w is
+               only possible for goto and jsr, so a delta that no longer fits is
+               reported rather than silently truncated into a wild jump. */
+            const int64_t delta = (int64_t)node->u.branch.target - (int64_t)offset;
+            if (delta < INT16_MIN || delta > INT16_MAX)
+            {
+                status = CLASSFILE_ERR_BRANCH_RANGE;
+                break;
+            }
+            byte_buffer_u2(&b, (u2)(int16_t)delta);
             break;
+        }
 
         case OPERAND_BRANCH_WIDE:
-            byte_buffer_u4(&b, (u4)(node->u.branch.target - (i4)offset));
+        {
+            const int64_t delta = (int64_t)node->u.branch.target - (int64_t)offset;
+            if (delta < INT32_MIN || delta > INT32_MAX)
+            {
+                status = CLASSFILE_ERR_BRANCH_RANGE;
+                break;
+            }
+            byte_buffer_u4(&b, (u4)(i4)delta);
             break;
+        }
 
         case OPERAND_TABLE_SWITCH:
         {
@@ -468,7 +527,7 @@ classfile_status instruction_list_encode(const instruction_list *list, u1 **out,
             byte_buffer_u4(&b, (u4)(node->u.table_switch.default_target - (i4)offset));
             byte_buffer_u4(&b, (u4)node->u.table_switch.low);
             byte_buffer_u4(&b, (u4)node->u.table_switch.high);
-            const u4 entries = (u4)(node->u.table_switch.high - node->u.table_switch.low + 1);
+            const u4 entries = instruction_switch_entries(node);
             for (u4 k = 0; k < entries; k++)
                 byte_buffer_u4(&b, (u4)(node->u.table_switch.targets[k] - (i4)offset));
             break;
@@ -490,10 +549,22 @@ classfile_status instruction_list_encode(const instruction_list *list, u1 **out,
         }
     }
 
+    if (status != CLASSFILE_OK)
+    {
+        byte_buffer_free(&b);
+        return status;
+    }
+
     if (!byte_buffer_ok(&b))
     {
         byte_buffer_free(&b);
         return CLASSFILE_ERR_OUT_OF_MEMORY;
+    }
+
+    if (b.size > JVM_MAX_CODE_LENGTH)
+    {
+        byte_buffer_free(&b);
+        return CLASSFILE_ERR_CODE_TOO_LARGE;
     }
 
     size_t size = 0;
