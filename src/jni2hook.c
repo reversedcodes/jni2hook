@@ -446,8 +446,16 @@ static jni2hook_status reapply(hooked_class *target)
         definition_owned = true;
     }
 
+    /* The window that has to be closed is between RedefineClasses making a
+       method native and RegisterNatives binding it, where a thread reaching it
+       would get an UnsatisfiedLinkError. With no hooks left there is nothing to
+       bind afterwards and therefore no window, so a full uninstall does not
+       stop every thread in the VM for nothing. */
     suspended_set suspended;
-    suspend_others(&suspended);
+    if (target->count != 0)
+        suspend_others(&suspended);
+    else
+        memset(&suspended, 0, sizeof(suspended));
 
     jvmtiClassDefinition class_definition;
     class_definition.klass = target->klass;
