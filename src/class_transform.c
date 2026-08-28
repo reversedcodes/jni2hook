@@ -3,6 +3,7 @@
 #include "jni2hook/utils/visitors/code_editor.h"
 #include "jni2hook/utils/visitors/constructor_init.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -685,6 +686,7 @@ transform_status class_transform_insert_guarded_call(ClassFile *cf,
                                                      const char *descriptor,
                                                      const char *owner,
                                                      const char *callee,
+                                                     const char *value_callee,
                                                      int argument,
                                                      classfile_status *out_cause)
 {
@@ -799,9 +801,105 @@ transform_status class_transform_insert_guarded_call(ClassFile *cf,
 
     if (returns != JVM_SIGNATURE_VOID)
     {
-        nodes[count].opcode = default_opcode_for(returns);
-        nodes[count].kind = OPERAND_NONE;
-        count++;
+        if (value_callee != NULL)
+        {
+            /* Asked separately rather than returned by the guard, because a
+               guard has to answer a yes or no and a value cannot carry one
+               without a sentinel. The second call only happens when the body is
+               being skipped, and by then the guard has already run on this
+               thread and has the value to hand. */
+            char value_descriptor[8];
+            value_descriptor[0] = JVM_SIGNATURE_FUNC;
+            value_descriptor[1] = JVM_SIGNATURE_INT;
+            value_descriptor[2] = JVM_SIGNATURE_ENDFUNC;
+            size_t at = 3;
+            for (const char *cursor = closing + 1; *cursor != 0; cursor++)
+            {
+                if (at + 1 >= sizeof(value_descriptor))
+                {
+                    code_editor_free(&editor);
+                    return fail(CLASSFILE_ERR_UNSUPPORTED, out_cause);
+                }
+                value_descriptor[at++] = *cursor;
+                if (*cursor != JVM_SIGNATURE_ARRAY && *cursor != JVM_SIGNATURE_CLASS)
+                    break;
+            }
+            value_descriptor[at] = 0;
+
+            /* A reference return is asked for as Object, for the same reason
+               the arguments are forwarded as Object: the callee's loader is not
+               expected to resolve the caller's types. */
+            if (closing[1] == JVM_SIGNATURE_CLASS || closing[1] == JVM_SIGNATURE_ARRAY)
+                snprintf(value_descriptor, sizeof(value_descriptor), "(I)L");
+
+            u2 value_ref = 0;
+            classfile_status value_status;
+            if (closing[1] == JVM_SIGNATURE_CLASS || closing[1] == JVM_SIGNATURE_ARRAY)
+                value_status = classFile_intern_methodref(cf, owner_index, value_callee,
+                                                          "(I)Ljava/lang/Object;", &value_ref);
+            else
+                value_status = classFile_intern_methodref(cf, owner_index, value_callee,
+                                                          value_descriptor, &value_ref);
+            if (value_status != CLASSFILE_OK)
+            {
+                code_editor_free(&editor);
+                return fail(value_status, out_cause);
+            }
+
+            nodes[count].opcode = JVM_OPC_sipush;
+            nodes[count].kind = OPERAND_IMMEDIATE;
+            nodes[count].u.immediate.value = argument;
+            count++;
+
+            nodes[count].opcode = JVM_OPC_invokestatic;
+            nodes[count].kind = OPERAND_CP_INDEX;
+            nodes[count].u.cp.index = value_ref;
+            count++;
+
+            /* Object comes back where the method promises something narrower,
+               so it has to be checked back down before it can be returned. */
+            if (closing[1] == JVM_SIGNATURE_CLASS || closing[1] == JVM_SIGNATURE_ARRAY)
+            {
+                char returned[512];
+                const size_t length = strlen(closing + 1);
+                if (length >= sizeof(returned))
+                {
+                    code_editor_free(&editor);
+                    return fail(CLASSFILE_ERR_UNSUPPORTED, out_cause);
+                }
+                if (closing[1] == JVM_SIGNATURE_CLASS)
+                {
+                    memcpy(returned, closing + 2, length - 2);
+                    returned[length - 2] = 0;
+                }
+                else
+                {
+                    memcpy(returned, closing + 1, length);
+                    returned[length] = 0;
+                }
+
+                u2 cast_index = 0;
+                const classfile_status cast_status =
+                    classFile_intern_class(cf, returned, &cast_index);
+                if (cast_status != CLASSFILE_OK)
+                {
+                    code_editor_free(&editor);
+                    return fail(cast_status, out_cause);
+                }
+
+                nodes[count].opcode = JVM_OPC_checkcast;
+                nodes[count].kind = OPERAND_CP_INDEX;
+                nodes[count].u.cp.index = cast_index;
+                count++;
+            }
+        }
+        else
+        {
+            nodes[count].opcode = default_opcode_for(returns);
+            nodes[count].kind = OPERAND_NONE;
+            count++;
+        }
+
         if (pushed < 2)
             pushed = 2;
     }

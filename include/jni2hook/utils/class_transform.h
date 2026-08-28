@@ -104,7 +104,16 @@ transform_status class_transform_insert_static_call(ClassFile *cf,
  *
  * The callee takes the same arguments class_transform_insert_static_call
  * forwards and returns a boolean. False lets the body run untouched; true skips
- * it and returns the default for the method's own return type.
+ * it.
+ *
+ * What is returned in the body's place depends on value_callee. Without one the
+ * method returns its own type's default. With one it is asked, as
+ * value_callee(int) returning the method's own type -- or Object for a
+ * reference, checked back down at the call site. It is only called when the
+ * body is being skipped, and by then the guard has run on this thread and has
+ * the answer to hand, which is why the value is asked for separately rather
+ * than returned by the guard: a guard has to answer yes or no, and a value
+ * cannot carry that without a sentinel.
  *
  * Only at method entry, and not in an initialiser. Skipping the body means
  * branching over it, a branch target needs a StackMapTable frame, and computing
@@ -117,6 +126,7 @@ transform_status class_transform_insert_guarded_call(ClassFile *cf,
                                                      const char *descriptor,
                                                      const char *owner,
                                                      const char *callee,
+                                                     const char *value_callee,
                                                      int argument,
                                                      classfile_status *out_cause);
 

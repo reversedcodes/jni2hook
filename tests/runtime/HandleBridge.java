@@ -28,19 +28,54 @@ public final class HandleBridge {
         BOUND[slot] = MethodHandles.lookup().unreflect(method);
     }
 
-    /* Guard for a replacing hook: true means the original body is skipped and
-       the method returns its type's default. */
+    /* Guard for a replacing hook: true means the original body is skipped. */
     public static volatile boolean cancel = false;
 
+    /* When set, the hook calls the original itself, does something with the
+       result and returns that instead. This is the piece that used to need the
+       body parked in a copy, and with it the VM flag that allows adding a
+       method during redefinition. */
+    public static volatile boolean intercept = false;
+
     public static int guardCalls = 0;
+    public static int originalCalls = 0;
+
+    /* Calling the original means calling the method that is hooked, so the
+       guard runs again on the way in. The depth marker is what makes the inner
+       call fall through to the real body instead of recursing. */
+    private static final ThreadLocal<Boolean> INSIDE =
+            ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Integer> VALUE = ThreadLocal.withInitial(() -> 0);
 
     public static boolean guard(int id, Object receiver, int number, Object text)
             throws Throwable {
+        if (INSIDE.get()) {
+            originalCalls++;
+            return false;
+        }
+
         guardCalls++;
+
+        if (intercept) {
+            INSIDE.set(Boolean.TRUE);
+            int original;
+            try {
+                original = (int) BOUND[1].invoke(receiver, number, text);
+            } finally {
+                INSIDE.set(Boolean.FALSE);
+            }
+            VALUE.set(original * 100);
+            return true;
+        }
+
         // Still ordinary Java against an object it cannot name.
         int scaled = (int) BOUND[0].invoke(receiver, number);
         report(id, scaled + String.valueOf(text).length());
         return cancel;
+    }
+
+    public static int guardValue(int id) {
+        return VALUE.get();
     }
 
     /* Guards for the other shapes. They only have to answer the question; the

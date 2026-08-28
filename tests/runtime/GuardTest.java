@@ -82,6 +82,21 @@ public class GuardTest {
         check("static skipped: zero comes back", BridgeTarget.stat(4), 0);
         cancel.setBoolean(null, false);
 
+        System.out.println("\n-- the hook calls the original and answers with its own value --");
+        Field intercept = bridge.getField("intercept");
+        Field originalCalls = bridge.getField("originalCalls");
+        intercept.setBoolean(null, true);
+        originalCalls.setInt(null, 0);
+        int before = guardCalls.getInt(null);
+
+        int intercepted = target.work(3, "abcd");
+        check("the value the hook computed from the original", intercepted, 3400);
+        check("the hook ran once", guardCalls.getInt(null) - before, 1);
+        check("and reached the real body exactly once", originalCalls.getInt(null), 1);
+
+        intercept.setBoolean(null, false);
+        check("without interception the body answers again", target.work(3, "abcd"), 34);
+
         shutdown();
 
         System.out.println(failures == 0 ? "\na hook can skip the body it replaces"

@@ -43,8 +43,23 @@
    read out of the class file at run time, so it is never written down here.
    Note that javac does not emit methods in source order -- this one is second,
    not third -- which is exactly why the layout is read rather than assumed. */
-#define BOUND_SLOT 2
-#define BOUND_DESCRIPTOR "(I)I"
+/* Which methods of the target the bridge is given, named by descriptor and
+   found in the class file at run time. No method name is written down on either
+   side of the bridge, which is the point: the Minecraft equivalents are renamed
+   every version.
+ *
+ * A slot index is what a generator would emit, and Omega does exactly that from
+ * the jar it targets. It cannot be written down here, because the slot is a
+ * property of one compiled artifact and not of the source: javac 17 puts stat
+ * before work in this class and javac 25 puts work before stat. Deriving it is
+ * what a generator does too, only offline. */
+static const struct
+{
+    const char *descriptor;
+} kBound[] = {
+    {"(I)I"},                       /* scale, for the observing hook */
+    {"(ILjava/lang/String;)I"},     /* work, for calling the original */
+};
 
 static int g_reports = 0;
 static jint g_id = 0;
@@ -247,62 +262,73 @@ static bool bind_by_slot(JNIEnv *env, jclass target, jclass bridge)
     if (JNI2Hook_ReadMethodLayout(original, (size_t)original_size, &layout) != JNI2HOOK_OK)
         return false;
 
-    if (BOUND_SLOT >= layout.count)
-    {
-        JNI2Hook_FreeMethodLayout(&layout);
-        return false;
-    }
-
     for (size_t i = 0; i < layout.count; i++)
         printf("      slot %zu: %s%s\n", i, layout.methods[i].name,
                layout.methods[i].descriptor);
-
-    /* The slot is generated from the class file in real use; here it is written
-       down, so it is checked. Adding a method to the target moves everything
-       after it, and binding the wrong one would otherwise only surface later as
-       a WrongMethodTypeException. */
-    if (strcmp(layout.methods[BOUND_SLOT].descriptor, BOUND_DESCRIPTOR) != 0)
-    {
-        printf("      slot %d is %s%s, expected something %s\n", BOUND_SLOT,
-               layout.methods[BOUND_SLOT].name, layout.methods[BOUND_SLOT].descriptor,
-               BOUND_DESCRIPTOR);
-        JNI2Hook_FreeMethodLayout(&layout);
-        return false;
-    }
-
-    jmethodID method = (*env)->GetMethodID(env, target, layout.methods[BOUND_SLOT].name,
-                                           layout.methods[BOUND_SLOT].descriptor);
-    JNI2Hook_FreeMethodLayout(&layout);
-    if (method == NULL)
-    {
-        (*env)->ExceptionClear(env);
-        return false;
-    }
-
-    jobject reflected = (*env)->ToReflectedMethod(env, target, method, JNI_FALSE);
-    if (reflected == NULL)
-    {
-        (*env)->ExceptionClear(env);
-        return false;
-    }
 
     jmethodID bind = (*env)->GetStaticMethodID(env, bridge, "bind", "(ILjava/lang/Object;)V");
     if (bind == NULL)
     {
         (*env)->ExceptionClear(env);
+        JNI2Hook_FreeMethodLayout(&layout);
         return false;
     }
 
-    (*env)->CallStaticVoidMethod(env, bridge, bind, 0, reflected);
-    if ((*env)->ExceptionCheck(env))
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(kBound) / sizeof(kBound[0]) && ok; i++)
     {
-        (*env)->ExceptionDescribe(env);
-        (*env)->ExceptionClear(env);
-        return false;
+        jobject reflected = NULL;
+        size_t found = layout.count;
+
+        for (size_t slot = 0; slot < layout.count && reflected == NULL; slot++)
+        {
+            if (strcmp(layout.methods[slot].descriptor, kBound[i].descriptor) != 0)
+                continue;
+
+            /* More than one method can share a descriptor -- scale and stat
+               both read (I)I -- so the one that binds as an instance method is
+               the one meant. */
+            jmethodID method = (*env)->GetMethodID(env, target, layout.methods[slot].name,
+                                                   layout.methods[slot].descriptor);
+            if (method == NULL)
+            {
+                (*env)->ExceptionClear(env);
+                continue;
+            }
+
+            reflected = (*env)->ToReflectedMethod(env, target, method, JNI_FALSE);
+            if (reflected == NULL)
+                (*env)->ExceptionClear(env);
+            else
+                found = slot;
+        }
+
+        if (reflected == NULL)
+        {
+            printf("      no instance method with descriptor %s\n", kBound[i].descriptor);
+            ok = false;
+            break;
+        }
+
+        printf("      %s is at slot %zu\n", kBound[i].descriptor, found);
+
+        (*env)->CallStaticVoidMethod(env, bridge, bind, (jint)i, reflected);
+        if ((*env)->ExceptionCheck(env))
+        {
+            (*env)->ExceptionDescribe(env);
+            (*env)->ExceptionClear(env);
+            ok = false;
+        }
     }
-    return true;
+
+    JNI2Hook_FreeMethodLayout(&layout);
+    return ok;
 }
 
+/* Defines the name-free bridge into the target's own loader, binds its native
+   report, captures the target's original bytes, clears the VM flag so nothing
+   after this may rely on it, hands the bridge its method handles, and inserts
+   the forwarding call. */
 static jint install_handle_bridge(JNIEnv *env, jclass target, jstring bridge_path)
 {
     failures = 0;
@@ -349,23 +375,16 @@ static jint install_handle_bridge(JNIEnv *env, jclass target, jstring bridge_pat
 
     char *class_name = jvm_class_name_of(target);
     jvmtiError capture = JVMTI_ERROR_NONE;
-    const bool captured = class_name != NULL && class_cache_ensure(target, class_name, &capture);
-    check("captured the original bytes", captured);
-    /* Printed because it is what made a wrong capture visible once: the bytes
-       came back the right size for some other class entirely. */
+    const bool got = class_name != NULL && class_cache_ensure(target, class_name, &capture);
+    check("captured the original bytes", got);
     printf("      target is %s, capture said jvmti %d\n",
            class_name != NULL ? class_name : "<null>", (int)capture);
-    {
-        jint captured_size = 0;
-        const unsigned char *bytes = class_cache_get(env, target, &captured_size);
-        printf("      cached %d bytes for it\n", bytes != NULL ? (int)captured_size : -1);
-    }
     free(class_name);
 
     bool previous = false;
     vm_structs_set_bool_flag("AllowRedefinitionToAddDeleteMethods", false, &previous);
 
-    check("bound the target's method by slot, never by name",
+    check("bound the target's methods by slot, never by name",
           bind_by_slot(env, target, bridge_class));
 
     jint original_size = 0;
@@ -455,11 +474,12 @@ JNIEXPORT jint JNICALL Java_GuardTest_installGuard(JNIEnv *env, jclass unused,
         const char *method;
         const char *descriptor;
         const char *callee;
+        const char *value_callee;
     } guards[] = {
-        {"work", "(ILjava/lang/String;)I", "guard"},
-        {"act", "(JD)V", "guardVoid"},
-        {"pick", "([Ljava/lang/String;Z)Ljava/lang/String;", "guardRef"},
-        {"stat", "(I)I", "guardStatic"},
+        {"work", "(ILjava/lang/String;)I", "guard", "guardValue"},
+        {"act", "(JD)V", "guardVoid", NULL},
+        {"pick", "([Ljava/lang/String;Z)Ljava/lang/String;", "guardRef", NULL},
+        {"stat", "(I)I", "guardStatic", NULL},
     };
 
     transform_status transformed = TRANSFORM_OK;
@@ -468,7 +488,7 @@ JNIEXPORT jint JNICALL Java_GuardTest_installGuard(JNIEnv *env, jclass unused,
         classfile_status cause = CLASSFILE_OK;
         const transform_status one = class_transform_insert_guarded_call(
             cf, guards[i].method, guards[i].descriptor, HANDLE_BRIDGE_NAME, guards[i].callee,
-            11, &cause);
+            guards[i].value_callee, 11, &cause);
         if (one != TRANSFORM_OK)
         {
             printf("      %s%s: %s (%s)\n", guards[i].method, guards[i].descriptor,
