@@ -28,6 +28,38 @@ public final class HandleBridge {
         BOUND[slot] = MethodHandles.lookup().unreflect(method);
     }
 
+    /* Guard for a replacing hook: true means the original body is skipped and
+       the method returns its type's default. */
+    public static volatile boolean cancel = false;
+
+    public static int guardCalls = 0;
+
+    public static boolean guard(int id, Object receiver, int number, Object text)
+            throws Throwable {
+        guardCalls++;
+        // Still ordinary Java against an object it cannot name.
+        int scaled = (int) BOUND[0].invoke(receiver, number);
+        report(id, scaled + String.valueOf(text).length());
+        return cancel;
+    }
+
+    /* Guards for the other shapes. They only have to answer the question; the
+       inserted bytecode supplies the return value. */
+    public static boolean guardVoid(int id, Object receiver, long big, double fraction) {
+        guardCalls++;
+        return cancel;
+    }
+
+    public static boolean guardRef(int id, Object receiver, Object items, boolean flag) {
+        guardCalls++;
+        return cancel;
+    }
+
+    public static boolean guardStatic(int id, int value) {
+        guardCalls++;
+        return cancel;
+    }
+
     public static void enter(int id, Object receiver, int number, Object text) throws Throwable {
         enters++;
 

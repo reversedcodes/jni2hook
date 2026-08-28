@@ -43,7 +43,8 @@
    read out of the class file at run time, so it is never written down here.
    Note that javac does not emit methods in source order -- this one is second,
    not third -- which is exactly why the layout is read rather than assumed. */
-#define BOUND_SLOT 1
+#define BOUND_SLOT 2
+#define BOUND_DESCRIPTOR "(I)I"
 
 static int g_reports = 0;
 static jint g_id = 0;
@@ -256,6 +257,19 @@ static bool bind_by_slot(JNIEnv *env, jclass target, jclass bridge)
         printf("      slot %zu: %s%s\n", i, layout.methods[i].name,
                layout.methods[i].descriptor);
 
+    /* The slot is generated from the class file in real use; here it is written
+       down, so it is checked. Adding a method to the target moves everything
+       after it, and binding the wrong one would otherwise only surface later as
+       a WrongMethodTypeException. */
+    if (strcmp(layout.methods[BOUND_SLOT].descriptor, BOUND_DESCRIPTOR) != 0)
+    {
+        printf("      slot %d is %s%s, expected something %s\n", BOUND_SLOT,
+               layout.methods[BOUND_SLOT].name, layout.methods[BOUND_SLOT].descriptor,
+               BOUND_DESCRIPTOR);
+        JNI2Hook_FreeMethodLayout(&layout);
+        return false;
+    }
+
     jmethodID method = (*env)->GetMethodID(env, target, layout.methods[BOUND_SLOT].name,
                                            layout.methods[BOUND_SLOT].descriptor);
     JNI2Hook_FreeMethodLayout(&layout);
@@ -413,11 +427,105 @@ JNIEXPORT jint JNICALL Java_LoaderCasesTest_install(JNIEnv *env, jclass unused, 
     return install_handle_bridge(env, target, bridge_path);
 }
 
+/* The guarded form: the same bridge, but it decides whether the body runs. */
+JNIEXPORT jint JNICALL Java_GuardTest_installGuard(JNIEnv *env, jclass unused,
+                                                         jclass target, jstring bridge_path)
+{
+    (void)unused;
+    const jni2hook_status init = JNI2Hook_InitFromRunningVm();
+    if (init != JNI2HOOK_OK)
+        return 1;
+
+    const jint installed = install_handle_bridge(env, target, bridge_path);
+    if (installed != 0)
+        return installed;
+
+    jint original_size = 0;
+    const unsigned char *original = class_cache_get(env, target, &original_size);
+    ClassFile *cf = NULL;
+    if (original == NULL ||
+        classfile_parse(original, (size_t)original_size, &cf) != CLASSFILE_OK)
+        return 1;
+
+    const u2 before = cf->methods.count;
+
+    /* Every shape the frame builder has to get right, guarded in one pass. */
+    static const struct
+    {
+        const char *method;
+        const char *descriptor;
+        const char *callee;
+    } guards[] = {
+        {"work", "(ILjava/lang/String;)I", "guard"},
+        {"act", "(JD)V", "guardVoid"},
+        {"pick", "([Ljava/lang/String;Z)Ljava/lang/String;", "guardRef"},
+        {"stat", "(I)I", "guardStatic"},
+    };
+
+    transform_status transformed = TRANSFORM_OK;
+    for (size_t i = 0; i < sizeof(guards) / sizeof(guards[0]); i++)
+    {
+        classfile_status cause = CLASSFILE_OK;
+        const transform_status one = class_transform_insert_guarded_call(
+            cf, guards[i].method, guards[i].descriptor, HANDLE_BRIDGE_NAME, guards[i].callee,
+            11, &cause);
+        if (one != TRANSFORM_OK)
+        {
+            printf("      %s%s: %s (%s)\n", guards[i].method, guards[i].descriptor,
+                   transform_status_message(one), classfile_status_message(cause));
+            transformed = one;
+        }
+    }
+    check("inserted a guard into every shape", transformed == TRANSFORM_OK);
+    check("the target still gained no method", cf->methods.count == before);
+
+    u1 *rewritten = NULL;
+    size_t rewritten_size = 0;
+    const classfile_status serialized = classfile_serialize(cf, &rewritten, &rewritten_size);
+    classFile_destroy(cf);
+    if (serialized != CLASSFILE_OK)
+        return 1;
+
+    jvmtiEnv *jvmti = jvm_jvmti();
+    jvmtiClassDefinition definition;
+    definition.klass = target;
+    definition.class_byte_count = (jint)rewritten_size;
+    definition.class_bytes = rewritten;
+    const jvmtiError redefined = (*jvmti)->RedefineClasses(jvmti, 1, &definition);
+    free(rewritten);
+    if (redefined != JVMTI_ERROR_NONE)
+        printf("      RedefineClasses returned %d\n", (int)redefined);
+    check("RedefineClasses accepted the guarded body", redefined == JVMTI_ERROR_NONE);
+
+    return failures;
+}
+
 JNIEXPORT jint JNICALL Java_LoaderCasesTest_reports(JNIEnv *env, jclass unused)
 {
     (void)env;
     (void)unused;
     return g_reports;
+}
+
+JNIEXPORT jint JNICALL Java_GuardTest_reports(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    return g_reports;
+}
+
+JNIEXPORT jint JNICALL Java_GuardTest_reportedValue(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    return g_value;
+}
+
+JNIEXPORT void JNICALL Java_GuardTest_shutdown(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    JNI2Hook_Shutdown();
 }
 
 JNIEXPORT jint JNICALL Java_LoaderCasesTest_reportedValue(JNIEnv *env, jclass unused)

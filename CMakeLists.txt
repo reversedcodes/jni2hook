@@ -138,6 +138,12 @@ if(JNI2HOOK_BUILD_TESTS)
                 SKIP_RETURN_CODE 2
                 ENVIRONMENT "BRIDGE_LIBRARY=$<TARGET_FILE:j2h_java_bridge>;WORK=${CMAKE_CURRENT_BINARY_DIR}/loader-cases")
 
+            add_test(NAME guarded_hook
+                COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_guard.sh)
+            set_tests_properties(guarded_hook PROPERTIES
+                SKIP_RETURN_CODE 2
+                ENVIRONMENT "BRIDGE_LIBRARY=$<TARGET_FILE:j2h_java_bridge>;WORK=${CMAKE_CURRENT_BINARY_DIR}/guard")
+
             add_test(NAME shift_semantics
                 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_shift_semantics.sh)
             set_tests_properties(shift_semantics PROPERTIES

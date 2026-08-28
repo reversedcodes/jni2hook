@@ -3,6 +3,7 @@
 #include "jni2hook/utils/visitors/code_editor.h"
 #include "jni2hook/utils/visitors/constructor_init.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 const char *transform_status_message(transform_status status)
@@ -337,6 +338,207 @@ static bool build_callee_descriptor(const forwarded_parameter *parameters, u2 co
     return true;
 }
 
+
+/* The entry state of a method, as a StackMapTable frame.
+ *
+ * A guarded call branches over the original body, and a branch target needs a
+ * frame. Computing one in general means dataflow analysis, which is exactly
+ * what this library does not do -- but the target here is the instruction that
+ * was at offset 0, and its state is the state the method starts in: the
+ * receiver and the declared parameters in their slots, nothing on the stack.
+ * That is readable straight off the descriptor, so this one case is tractable
+ * where the general one is not.
+ *
+ * A long or a double takes two local slots but only one entry in the frame. */
+static classfile_status build_entry_frame(ClassFile *cf, const char *descriptor, bool is_static,
+                                          i4 offset, stack_map_frame *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->kind = FRAME_FULL;
+    out->raw_tag = 255;
+    out->offset = offset;
+
+    verification_type locals[256];
+    u2 count = 0;
+
+    if (!is_static)
+    {
+        locals[count].tag = JVM_ITEM_Object;
+        locals[count].cpool_index = cf->this_class;
+        locals[count].offset = 0;
+        count++;
+    }
+
+    for (const char *cursor = descriptor + 1; *cursor != JVM_SIGNATURE_ENDFUNC; cursor++)
+    {
+        if (*cursor == 0 || count == (u2)(sizeof(locals) / sizeof(locals[0])))
+            return CLASSFILE_ERR_UNSUPPORTED;
+
+        memset(&locals[count], 0, sizeof(locals[count]));
+
+        const char *type = cursor;
+        while (*cursor == JVM_SIGNATURE_ARRAY)
+        {
+            cursor++;
+            if (*cursor == 0)
+                return CLASSFILE_ERR_UNSUPPORTED;
+        }
+
+        const bool is_array = type != cursor;
+        /* Decided before the cursor moves: skipping to the ; of an L...; leaves
+           it on the semicolon, and testing there sees no reference at all. */
+        const bool is_reference = is_array || *cursor == JVM_SIGNATURE_CLASS;
+
+        if (*cursor == JVM_SIGNATURE_CLASS)
+        {
+            while (*cursor != JVM_SIGNATURE_ENDCLASS)
+            {
+                cursor++;
+                if (*cursor == 0)
+                    return CLASSFILE_ERR_UNSUPPORTED;
+            }
+        }
+
+        if (is_reference)
+        {
+            /* An array's verification type names the descriptor itself, a plain
+               reference names the class inside the L...; wrapper. */
+            char name[512];
+            const size_t length = is_array ? (size_t)(cursor - type + 1)
+                                           : (size_t)(cursor - type - 1);
+            const char *start = is_array ? type : type + 1;
+            if (length >= sizeof(name))
+                return CLASSFILE_ERR_UNSUPPORTED;
+            memcpy(name, start, length);
+            name[length] = 0;
+
+            u2 class_index = 0;
+            const classfile_status status = classFile_intern_class(cf, name, &class_index);
+            if (status != CLASSFILE_OK)
+                return status;
+
+            locals[count].tag = JVM_ITEM_Object;
+            locals[count].cpool_index = class_index;
+        }
+        else
+        {
+            switch (*cursor)
+            {
+            case JVM_SIGNATURE_LONG:
+                locals[count].tag = JVM_ITEM_Long;
+                break;
+            case JVM_SIGNATURE_FLOAT:
+                locals[count].tag = JVM_ITEM_Float;
+                break;
+            case JVM_SIGNATURE_DOUBLE:
+                locals[count].tag = JVM_ITEM_Double;
+                break;
+            case JVM_SIGNATURE_BYTE:
+            case JVM_SIGNATURE_CHAR:
+            case JVM_SIGNATURE_SHORT:
+            case JVM_SIGNATURE_BOOLEAN:
+            case JVM_SIGNATURE_INT:
+                locals[count].tag = JVM_ITEM_Integer;
+                break;
+            default:
+                return CLASSFILE_ERR_UNSUPPORTED;
+            }
+        }
+
+        count++;
+    }
+
+    if (count != 0)
+    {
+        out->locals = malloc((size_t)count * sizeof(*out->locals));
+        if (out->locals == NULL)
+            return CLASSFILE_ERR_OUT_OF_MEMORY;
+        memcpy(out->locals, locals, (size_t)count * sizeof(*out->locals));
+    }
+    out->locals_count = count;
+    return CLASSFILE_OK;
+}
+
+static classfile_status insert_frame(stack_map_table *table, const stack_map_frame *frame,
+                                    bool *out_taken)
+{
+    /* Kept sorted by offset, because the deltas are rebuilt from that order. */
+    *out_taken = false;
+    if (table->count == CLASSFILE_MAX_COUNT)
+        return CLASSFILE_ERR_LIMIT_EXCEEDED;
+
+    if (table->count == table->capacity)
+    {
+        u2 capacity = table->capacity ? table->capacity : 8;
+        if ((size_t)capacity * 2 > CLASSFILE_MAX_COUNT)
+            capacity = CLASSFILE_MAX_COUNT;
+        else
+            capacity = (u2)(capacity * 2);
+
+        stack_map_frame *grown = realloc(table->frames, (size_t)capacity * sizeof(*grown));
+        if (grown == NULL)
+            return CLASSFILE_ERR_OUT_OF_MEMORY;
+        memset(grown + table->capacity, 0, (size_t)(capacity - table->capacity) * sizeof(*grown));
+        table->frames = grown;
+        table->capacity = capacity;
+    }
+
+    u2 at = 0;
+    while (at < table->count && table->frames[at].offset < frame->offset)
+        at++;
+
+    if (at < table->count && table->frames[at].offset == frame->offset)
+    {
+        *out_taken = false;
+        return CLASSFILE_OK; /* the point is already described */
+    }
+
+    memmove(&table->frames[at + 1], &table->frames[at],
+            (size_t)(table->count - at) * sizeof(*table->frames));
+    table->frames[at] = *frame;
+    table->count++;
+    *out_taken = true;
+    return CLASSFILE_OK;
+}
+
+static u1 return_opcode_for(char kind)
+{
+    switch (kind)
+    {
+    case JVM_SIGNATURE_VOID:
+        return JVM_OPC_return;
+    case JVM_SIGNATURE_LONG:
+        return JVM_OPC_lreturn;
+    case JVM_SIGNATURE_FLOAT:
+        return JVM_OPC_freturn;
+    case JVM_SIGNATURE_DOUBLE:
+        return JVM_OPC_dreturn;
+    case JVM_SIGNATURE_CLASS:
+    case JVM_SIGNATURE_ARRAY:
+        return JVM_OPC_areturn;
+    default:
+        return JVM_OPC_ireturn;
+    }
+}
+
+static u1 default_opcode_for(char kind)
+{
+    switch (kind)
+    {
+    case JVM_SIGNATURE_LONG:
+        return JVM_OPC_lconst_0;
+    case JVM_SIGNATURE_FLOAT:
+        return JVM_OPC_fconst_0;
+    case JVM_SIGNATURE_DOUBLE:
+        return JVM_OPC_dconst_0;
+    case JVM_SIGNATURE_CLASS:
+    case JVM_SIGNATURE_ARRAY:
+        return JVM_OPC_aconst_null;
+    default:
+        return JVM_OPC_iconst_0;
+    }
+}
+
 transform_status class_transform_insert_static_call(ClassFile *cf,
                                                     const char *name,
                                                     const char *descriptor,
@@ -473,6 +675,197 @@ transform_status class_transform_insert_static_call(ClassFile *cf,
     if (status != CLASSFILE_OK)
         return status == CLASSFILE_ERR_BAD_OFFSET ? TRANSFORM_ERR_BAD_OFFSET
                                                   : fail(status, out_cause);
+
+    return TRANSFORM_OK;
+}
+
+
+transform_status class_transform_insert_guarded_call(ClassFile *cf,
+                                                     const char *name,
+                                                     const char *descriptor,
+                                                     const char *owner,
+                                                     const char *callee,
+                                                     int argument,
+                                                     classfile_status *out_cause)
+{
+    if (out_cause != NULL)
+        *out_cause = CLASSFILE_OK;
+    if (cf == NULL || name == NULL || descriptor == NULL || owner == NULL || callee == NULL)
+        return TRANSFORM_ERR_METHOD_NOT_FOUND;
+    if (argument < -32768 || argument > 32767)
+        return TRANSFORM_ERR_BAD_OFFSET;
+
+    const member_info *found = classFile_find_method(cf, name, descriptor);
+    if (found == NULL)
+        return TRANSFORM_ERR_METHOD_NOT_FOUND;
+
+    const u2 index = (u2)(found - cf->methods.items);
+
+    /* Only at method entry, and not in an initialiser. Everywhere else the
+       branch target's frame would need real dataflow, and in <init> the
+       receiver is still uninitialised at offset 0. */
+    if (is_initializer(cf, &cf->methods.items[index]))
+        return TRANSFORM_ERR_INITIALIZER;
+    if ((cf->methods.items[index].access_flags & JVM_ACC_ABSTRACT) != 0)
+        return TRANSFORM_ERR_ABSTRACT;
+    if ((cf->methods.items[index].access_flags & JVM_ACC_NATIVE) != 0)
+        return TRANSFORM_ERR_ALREADY_NATIVE;
+
+    attribute_info *code = attribute_list_find(&cf->methods.items[index].attributes,
+                                               &cf->constant_pool, "Code");
+    if (code == NULL)
+        return TRANSFORM_ERR_NO_CODE;
+
+    const bool is_static = (cf->methods.items[index].access_flags & JVM_ACC_STATIC) != 0;
+
+    const char *closing = strchr(descriptor, JVM_SIGNATURE_ENDFUNC);
+    if (closing == NULL || closing[1] == 0)
+        return TRANSFORM_ERR_METHOD_NOT_FOUND;
+    const char returns = closing[1];
+
+    u2 owner_index = 0;
+    classfile_status status = classFile_intern_class(cf, owner, &owner_index);
+    if (status != CLASSFILE_OK)
+        return fail(status, out_cause);
+
+    code_editor editor;
+    status = code_editor_load(code, &cf->constant_pool, &editor);
+    if (status != CLASSFILE_OK)
+        return fail(status, out_cause);
+
+    forwarded_parameter parameters[64];
+    u2 parameter_count = 0;
+    u2 parameter_slots = 0;
+    if (!describe_parameters(descriptor, is_static, parameters,
+                             (u2)(sizeof(parameters) / sizeof(parameters[0])),
+                             &parameter_count, &parameter_slots))
+    {
+        code_editor_free(&editor);
+        return TRANSFORM_ERR_METHOD_NOT_FOUND;
+    }
+
+    char callee_descriptor[1024];
+    if (!build_callee_descriptor(parameters, parameter_count, callee_descriptor,
+                                 sizeof(callee_descriptor)))
+    {
+        code_editor_free(&editor);
+        return TRANSFORM_ERR_METHOD_NOT_FOUND;
+    }
+    /* The guard answers a question, so it returns a boolean rather than void. */
+    callee_descriptor[strlen(callee_descriptor) - 1] = JVM_SIGNATURE_BOOLEAN;
+
+    u2 methodref = 0;
+    status = classFile_intern_methodref(cf, owner_index, callee, callee_descriptor, &methodref);
+    if (status != CLASSFILE_OK)
+    {
+        code_editor_free(&editor);
+        return fail(status, out_cause);
+    }
+
+    /* sipush id, one load per argument, invokestatic, ifeq over the body, then
+       the value to return in its place. */
+    instruction nodes[70];
+    memset(nodes, 0, sizeof(nodes));
+    u4 count = 0;
+
+    nodes[count].opcode = JVM_OPC_sipush;
+    nodes[count].kind = OPERAND_IMMEDIATE;
+    nodes[count].u.immediate.value = argument;
+    count++;
+
+    u2 pushed = 1;
+    for (u2 i = 0; i < parameter_count; i++)
+    {
+        nodes[count].opcode = parameters[i].load_opcode;
+        nodes[count].kind = OPERAND_LOCAL;
+        nodes[count].u.local.index = parameters[i].slot;
+        count++;
+        pushed = (u2)(pushed + (parameters[i].load_opcode == JVM_OPC_lload ||
+                                        parameters[i].load_opcode == JVM_OPC_dload
+                                    ? 2
+                                    : 1));
+    }
+
+    nodes[count].opcode = JVM_OPC_invokestatic;
+    nodes[count].kind = OPERAND_CP_INDEX;
+    nodes[count].u.cp.index = methodref;
+    count++;
+
+    const u4 branch_node = count;
+    nodes[count].opcode = JVM_OPC_ifeq;
+    nodes[count].kind = OPERAND_BRANCH;
+    nodes[count].u.branch.target = 0; /* patched once the offsets are known */
+    count++;
+
+    if (returns != JVM_SIGNATURE_VOID)
+    {
+        nodes[count].opcode = default_opcode_for(returns);
+        nodes[count].kind = OPERAND_NONE;
+        count++;
+        if (pushed < 2)
+            pushed = 2;
+    }
+
+    nodes[count].opcode = return_opcode_for(returns);
+    nodes[count].kind = OPERAND_NONE;
+    count++;
+
+    status = code_editor_insert(&editor, 0, nodes, count, pushed);
+    if (status != CLASSFILE_OK)
+    {
+        code_editor_free(&editor);
+        return status == CLASSFILE_ERR_BAD_OFFSET ? TRANSFORM_ERR_BAD_OFFSET
+                                                  : fail(status, out_cause);
+    }
+
+    /* The body now starts at index count, and that is where the branch goes and
+       where the frame belongs. Both are settled here rather than before the
+       splice, because only now are the offsets final. */
+    if (editor.instructions.count <= count)
+    {
+        code_editor_free(&editor);
+        return fail(CLASSFILE_ERR_UNSUPPORTED, out_cause);
+    }
+
+    const i4 body_offset = (i4)editor.instructions.items[count].offset;
+    editor.instructions.items[branch_node].u.branch.target = body_offset;
+
+    stack_map_frame frame;
+    status = build_entry_frame(cf, descriptor, is_static, body_offset, &frame);
+    if (status == CLASSFILE_OK)
+    {
+        /* The table takes the frame unless that offset was already described,
+           in which case the existing one already says what this one would. */
+        bool taken = false;
+        status = insert_frame(&editor.stack_map, &frame, &taken);
+        if (!taken)
+            free(frame.locals);
+    }
+    if (status != CLASSFILE_OK)
+    {
+        code_editor_free(&editor);
+        return fail(status, out_cause);
+    }
+
+    if (!editor.has_stack_map)
+    {
+        u2 attribute_name = 0;
+        status = classFile_intern_utf8(cf, "StackMapTable", &attribute_name);
+        if (status != CLASSFILE_OK)
+        {
+            code_editor_free(&editor);
+            return fail(status, out_cause);
+        }
+        editor.stack_map_name_index = attribute_name;
+        editor.has_stack_map = true;
+    }
+
+    code = attribute_list_find(&cf->methods.items[index].attributes,
+                               &cf->constant_pool, "Code");
+    status = code_editor_store(&editor, code);
+    code_editor_free(&editor);
+    if (status != CLASSFILE_OK)
+        return fail(status, out_cause);
 
     return TRANSFORM_OK;
 }

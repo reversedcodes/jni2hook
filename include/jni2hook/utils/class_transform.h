@@ -99,6 +99,27 @@ transform_status class_transform_insert_static_call(ClassFile *cf,
                                                     bool forward_arguments,
                                                     classfile_status *out_cause);
 
+/* A hook that can decide whether the original body runs at all, still without
+ * adding anything to the class being hooked.
+ *
+ * The callee takes the same arguments class_transform_insert_static_call
+ * forwards and returns a boolean. False lets the body run untouched; true skips
+ * it and returns the default for the method's own return type.
+ *
+ * Only at method entry, and not in an initialiser. Skipping the body means
+ * branching over it, a branch target needs a StackMapTable frame, and computing
+ * one in general is dataflow analysis this library does not do. At offset 0 the
+ * frame is the state the method starts in -- the receiver and the declared
+ * parameters, an empty stack -- which is readable off the descriptor. Nowhere
+ * else is. */
+transform_status class_transform_insert_guarded_call(ClassFile *cf,
+                                                     const char *name,
+                                                     const char *descriptor,
+                                                     const char *owner,
+                                                     const char *callee,
+                                                     int argument,
+                                                     classfile_status *out_cause);
+
 transform_status class_transform_insert_call(ClassFile *cf,
                                              const char *name,
                                              const char *descriptor,
