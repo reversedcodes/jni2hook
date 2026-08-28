@@ -24,28 +24,47 @@ if [ ! -x "$transform" ]; then
     exit 2
 fi
 
-jdk="${JAVA_HOME:-}"
-if [ -z "$jdk" ]; then
-    for d in /usr/lib/jvm/*/; do
-        [ -x "$d/bin/javac" ] || continue
-        jdk="${d%/}"
-    done
-fi
-if [ -z "$jdk" ] || [ ! -x "$jdk/bin/javac" ]; then
-    echo "no JDK found, set JAVA_HOME" >&2
-    exit 2
-fi
-
 rm -rf "$work"
 mkdir -p "$work/src" "$work/verify" "$work/control" "$work/rewritten"
+
+# VerifyAll runs the JDK's own class file library, so it needs java.lang.classfile,
+# which is only there from 24 on. Candidates are probed by actually compiling it
+# rather than by parsing a version string, and JAVA_HOME is only the first guess:
+# on CI it is usually pinned to whatever the build needs, which is older.
+candidates=""
+[ -n "${JAVA_HOME:-}" ] && candidates="$JAVA_HOME"
+for d in /usr/lib/jvm/*/ /opt/hostedtoolcache/Java_*/*/*/ /Library/Java/JavaVirtualMachines/*/Contents/Home/; do
+    [ -x "${d%/}/bin/javac" ] && candidates="$candidates ${d%/}"
+done
+if command -v javac >/dev/null 2>&1; then
+    real="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+    candidates="$candidates $real"
+fi
+
+jdk=""
+for candidate in $candidates; do
+    [ -x "$candidate/bin/javac" ] || continue
+    if "$candidate/bin/javac" -d "$work/verify" \
+           "$here/corpus/VerifyAll.java" "$here/corpus/DefineAll.java" >/dev/null 2>&1; then
+        jdk="$candidate"
+        break
+    fi
+done
+
+if [ -z "$jdk" ]; then
+    echo "no JDK with java.lang.classfile (24 or newer) found, skipping" >&2
+    echo "tried:${candidates:- none}" >&2
+    exit 2
+fi
+echo "== using $jdk =="
 
 echo "== compiling the targets =="
 "$jdk/bin/javac" -g -d "$work/src" \
     "$here/corpus/MidHookTarget.java" \
     "$here/corpus/Basic.java" \
     "$here/corpus/Modern.java" \
-    "$here/corpus/TypeAnnotated.java" 2>/dev/null
-"$jdk/bin/javac" -d "$work/verify" "$here/corpus/VerifyAll.java" "$here/corpus/DefineAll.java" || exit 2
+    "$here/corpus/TypeAnnotated.java" \
+    "$here/corpus/UninitializedFrames.java" 2>/dev/null
 
 classes=$(find "$work/src" -name '*.class' | sort)
 if [ -z "$classes" ]; then

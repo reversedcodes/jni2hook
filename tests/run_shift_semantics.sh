@@ -25,15 +25,47 @@ set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
 transform="${TRANSFORM:-$root/build/j2h_transform}"
-classes="${CLASSES:-${WORK:-${TMPDIR:-/tmp}/jni2hook-corpus}}"
+work="${WORK:-${TMPDIR:-/tmp}/jni2hook-shift-semantics}"
 limit="${LIMIT:-2000}"
 
 if [ ! -x "$transform" ]; then
     echo "build j2h_transform first (cmake --build build)" >&2
     exit 2
 fi
+
+# Nothing here runs a JVM, so any javac will do. Point CLASSES at the corpus
+# run_corpus.sh builds to sweep the whole JDK instead.
+classes="${CLASSES:-}"
+if [ -z "$classes" ]; then
+    jdk="${JAVA_HOME:-}"
+    if [ -z "$jdk" ] || [ ! -x "$jdk/bin/javac" ]; then
+        for d in /usr/lib/jvm/*/; do
+            [ -x "${d%/}/bin/javac" ] && jdk="${d%/}"
+        done
+    fi
+    if [ -z "$jdk" ] || [ ! -x "$jdk/bin/javac" ]; then
+        if command -v javac >/dev/null 2>&1; then
+            jdk="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+        fi
+    fi
+    if [ -z "$jdk" ] || [ ! -x "$jdk/bin/javac" ]; then
+        echo "no javac found, skipping" >&2
+        exit 2
+    fi
+
+    rm -rf "$work"
+    mkdir -p "$work"
+    "$jdk/bin/javac" -g -d "$work" \
+        "$here/corpus/MidHookTarget.java" \
+        "$here/corpus/Basic.java" \
+        "$here/corpus/Modern.java" \
+        "$here/corpus/TypeAnnotated.java" \
+        "$here/corpus/UninitializedFrames.java" 2>/dev/null
+    classes="$work"
+fi
+
 if [ ! -d "$classes" ]; then
-    echo "no class tree at $classes, run tests/run_corpus.sh first or set CLASSES" >&2
+    echo "no class tree at $classes" >&2
     exit 2
 fi
 
@@ -61,6 +93,11 @@ printf '  %d class files, %d insertion points\n' "$files" "$points"
 printf '  %d position references stayed on the insertion point\n' "$anchored"
 printf '  %d instruction references followed their instruction\n' "$moved"
 printf '  %d files with a violation\n' "$failed"
+
+if [ "$files" -eq 0 ]; then
+    echo "no class files under $classes, skipping" >&2
+    exit 2
+fi
 
 # Read the two coverage numbers, not just the failure count. Zero anchored
 # references means nothing was actually exercised.

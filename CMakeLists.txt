@@ -121,17 +121,22 @@ if(JNI2HOOK_BUILD_TESTS)
         # the insertion point: one asks the JVM whether the result still
         # verifies, the other asserts where each reference ended up, which is
         # the part a verifier cannot see.
+        # Exit code 2 means the environment could not run the check, which ctest
+        # reports as skipped rather than passed. insert_offsets needs a JDK with
+        # java.lang.classfile for VerifyAll, so 24 or newer; shift_semantics
+        # runs no JVM at all and works with any javac.
         if(UNIX)
             add_test(NAME insert_offsets
                 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_insert_offsets.sh)
             set_tests_properties(insert_offsets PROPERTIES
+                SKIP_RETURN_CODE 2
                 ENVIRONMENT "TRANSFORM=$<TARGET_FILE:j2h_transform>;WORK=${CMAKE_CURRENT_BINARY_DIR}/insert-offsets")
 
             add_test(NAME shift_semantics
                 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_shift_semantics.sh)
             set_tests_properties(shift_semantics PROPERTIES
-                ENVIRONMENT "TRANSFORM=$<TARGET_FILE:j2h_transform>;CLASSES=${CMAKE_CURRENT_BINARY_DIR}/insert-offsets/src")
-            set_tests_properties(shift_semantics PROPERTIES DEPENDS insert_offsets)
+                SKIP_RETURN_CODE 2
+                ENVIRONMENT "TRANSFORM=$<TARGET_FILE:j2h_transform>;WORK=${CMAKE_CURRENT_BINARY_DIR}/shift-semantics")
         endif()
     endif()
 
