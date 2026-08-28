@@ -144,6 +144,13 @@ if(JNI2HOOK_BUILD_TESTS)
     target_link_libraries(j2h_runtime_test PRIVATE jni2hook)
     target_include_directories(j2h_runtime_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+    # Whether a hook can avoid adding a method to the class it hooks, and so
+    # avoid AllowRedefinitionToAddDeleteMethods entirely.
+    add_library(j2h_no_flag_hook SHARED tests/runtime/no_flag_hook.c)
+    target_link_libraries(j2h_no_flag_hook PRIVATE jni2hook)
+    target_include_directories(j2h_no_flag_hook PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_options(j2h_no_flag_hook PRIVATE ${JNI2HOOK_WARNINGS})
+
     if(WIN32)
         add_library(j2h_fake_jvm SHARED tests/windows/fake_jvm.c)
         set_target_properties(j2h_fake_jvm PROPERTIES OUTPUT_NAME jvm PREFIX "")

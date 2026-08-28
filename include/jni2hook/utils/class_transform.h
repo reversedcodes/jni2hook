@@ -61,6 +61,44 @@ transform_status class_transform_make_native(ClassFile *cf,
  * which is what a bytecode signature scan yields anyway. In <init>, an offset
  * before the initializing this()/super() invokespecial is moved directly after
  * that call, where this is a regular initialized reference. */
+/* Inserts a call to a static method of *another* class, adding nothing to this
+ * one.
+ *
+ * That distinction is the whole point. class_transform_insert_call and
+ * class_transform_make_native both put a new method on the class they rewrite,
+ * and RedefineClasses only accepts an added method while
+ * AllowRedefinitionToAddDeleteMethods is on -- a deprecated product flag that
+ * has to be written straight into HotSpot's flag table because nothing
+ * supported can change it in a running VM. Every hook currently rests on that.
+ *
+ * Changing only the bytecode of an existing method is the supported case and
+ * needs no flag at all. So if the callee lives on a class jni2hook defined
+ * itself, the target class only ever gets its constant pool grown and one
+ * method's Code rewritten.
+ *
+ * owner is an internal name ("com/example/Hooks"), and the callee has to exist
+ * by the time the method runs.
+ *
+ * With forward_arguments the receiver and every parameter are passed along, read
+ * straight out of the local slots they already occupy at method entry, and the
+ * callee's descriptor is derived from the target's. References are forwarded as
+ * java/lang/Object, because the callee's own loader cannot be expected to
+ * resolve the target's types. The callee always takes the int argument first:
+ *
+ *   int compute(int)          ->  callee(I, Object, int)
+ *   static void run(String)   ->  callee(int, Object)
+ *
+ * Without it only the int is passed, which is enough to identify the hook. */
+transform_status class_transform_insert_static_call(ClassFile *cf,
+                                                    const char *name,
+                                                    const char *descriptor,
+                                                    u4 at_offset,
+                                                    const char *owner,
+                                                    const char *callee,
+                                                    int argument,
+                                                    bool forward_arguments,
+                                                    classfile_status *out_cause);
+
 transform_status class_transform_insert_call(ClassFile *cf,
                                              const char *name,
                                              const char *descriptor,
