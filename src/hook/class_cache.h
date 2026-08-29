@@ -9,7 +9,7 @@
  *
  * Getting at those bytes is the awkward part of the whole library. A loaded
  * class does not hand its class file back, so the only way is to ask the VM to
- * retransform it and catch the bytes in a ClassFileLoadHook. Three things about
+ * retransform it and catch the bytes in a ClassFileLoadHook. Four things about
  * that are easy to get wrong:
  *
  * 1. The bytes must be captured exactly once, before the first redefinition.
@@ -17,9 +17,9 @@
  *    from, so capturing again after a hook is installed would hand back our own
  *    rewrite and the original body would be gone for good.
  *
- * 2. The hook has to be switched off again right after. It fires for every
- *    class the VM loads while enabled, on every thread, and leaving it on also
- *    breaks JNI DefineClass calls elsewhere in the process.
+ * 2. Capture-only mode is switched off immediately. Method watches deliberately
+ *    keep the event enabled, but initial loads go only to the read-only parser
+ *    and are never confused with the class currently being retransformed.
  *
  * 3. What arrives is the class as it currently stands, which for a modded game
  *    means after Mixin and friends have had their turn, not the pristine bytes
@@ -37,6 +37,11 @@
 
 bool class_cache_start(void);
 void class_cache_stop(void);
+
+/* Keeps the class-file and class-prepare events enabled while unresolved
+   method watches need them. The capture path still enables the file event
+   temporarily when there are no watches. */
+bool class_cache_set_watch_events(bool enabled);
 
 /* Captures the class if it is not cached yet. Safe to call repeatedly. */
 bool class_cache_ensure(jclass klass, const char *class_name, jvmtiError *out_error);

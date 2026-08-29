@@ -1,5 +1,6 @@
 #include "class_cache.h"
 
+#include "class_watch.h"
 #include "mutex.h"
 
 #include <stdlib.h>
@@ -25,6 +26,7 @@ static jclass      g_capture_class = NULL;
 static const char *g_capture_name  = NULL;
 static bool        g_captured      = false;
 static bool        g_started       = false;
+static bool        g_watch_events  = false;
 
 /* The recursive mutex matters: class_cache_ensure holds it across
    RetransformClasses, and the callback that lands inside that call runs on the
@@ -134,7 +136,6 @@ static void JNICALL on_class_file_load(jvmtiEnv *jvmti,
                                        unsigned char **new_class_data)
 {
     (void)jvmti;
-    (void)loader;
     (void)protection_domain;
 
     /* Leave the class alone: we only listen, the rewrite goes through
@@ -142,31 +143,44 @@ static void JNICALL on_class_file_load(jvmtiEnv *jvmti,
     *new_class_data_len = 0;
     *new_class_data     = NULL;
 
-    if (class_being_redefined == NULL || class_data == NULL || env == NULL)
+    if (class_data == NULL || env == NULL)
         return;
 
-    lock_cache();
-
-    /* Both halves are needed, and each covers what the other cannot.
-     *
-     * The name alone is not an identity: two loaders may each define a class of
-     * that name, and a modded game has plenty of loaders.
-     *
-     * class_being_redefined alone is worse. A class loaded while a retransform
-     * is in flight is reported with class_being_redefined still pointing at the
-     * class being retransformed, not NULL -- java/lang/Module$ReflectionData
-     * arrives that way in the middle of retransforming a class in a named
-     * module. Matching on identity alone therefore cached a JDK class's bytes
-     * under our target and the original body was gone for good. */
-    if (g_capture_class != NULL && name != NULL && g_capture_name != NULL &&
-        strcmp(name, g_capture_name) == 0 &&
-        (*env)->IsSameObject(env, class_being_redefined, g_capture_class) == JNI_TRUE)
+    if (class_being_redefined != NULL)
     {
-        if (store(env, class_being_redefined, name, class_data, class_data_len))
-            g_captured = true;
+        lock_cache();
+
+        /* Both halves are needed, and each covers what the other cannot.
+         *
+         * The name alone is not an identity: two loaders may each define a class of
+         * that name, and a modded game has plenty of loaders.
+         *
+         * class_being_redefined alone is worse. A class loaded while a retransform
+         * is in flight is reported with class_being_redefined still pointing at the
+         * class being retransformed, not NULL -- java/lang/Module$ReflectionData
+         * arrives that way in the middle of retransforming a class in a named
+         * module. Matching on identity alone therefore cached a JDK class's bytes
+         * under our target and the original body was gone for good. */
+        if (g_capture_class != NULL && name != NULL && g_capture_name != NULL &&
+            strcmp(name, g_capture_name) == 0 &&
+            (*env)->IsSameObject(env, class_being_redefined, g_capture_class) == JNI_TRUE)
+        {
+            if (store(env, class_being_redefined, name, class_data, class_data_len))
+                g_captured = true;
+        }
+
+        unlock_cache();
+        return;
     }
 
-    unlock_cache();
+    class_watch_on_class_file_load(env, loader, class_data_len, class_data);
+}
+
+static void JNICALL on_class_prepare(jvmtiEnv *jvmti, JNIEnv *env, jthread thread,
+                                     jclass klass)
+{
+    (void)thread;
+    class_watch_on_class_prepare(jvmti, env, klass);
 }
 
 bool class_cache_start(void)
@@ -185,6 +199,7 @@ bool class_cache_start(void)
     jvmtiEventCallbacks callbacks;
     memset(&callbacks, 0, sizeof(callbacks));
     callbacks.ClassFileLoadHook = on_class_file_load;
+    callbacks.ClassPrepare = on_class_prepare;
 
     if ((*jvmti)->SetEventCallbacks(jvmti, &callbacks, (jint)sizeof(callbacks)) != JVMTI_ERROR_NONE)
     {
@@ -206,13 +221,70 @@ void class_cache_stop(void)
     {
         (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_DISABLE,
                                            JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, NULL);
+        (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_DISABLE,
+                                           JVMTI_EVENT_CLASS_PREPARE, NULL);
         jvmtiEventCallbacks callbacks;
         memset(&callbacks, 0, sizeof(callbacks));
         (*jvmti)->SetEventCallbacks(jvmti, &callbacks, (jint)sizeof(callbacks));
     }
-    g_started  = false;
+    g_started = false;
     g_captured = false;
+    g_watch_events = false;
     unlock_cache();
+}
+
+bool class_cache_set_watch_events(bool enabled)
+{
+    jvmtiEnv *jvmti = jvm_jvmti();
+    if (jvmti == NULL)
+        return false;
+
+    lock_cache();
+    if (!g_started)
+    {
+        unlock_cache();
+        return false;
+    }
+    if (g_watch_events == enabled)
+    {
+        unlock_cache();
+        return true;
+    }
+
+    jvmtiError error = JVMTI_ERROR_NONE;
+    if (enabled)
+    {
+        error = (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_ENABLE,
+                                                   JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, NULL);
+        if (error == JVMTI_ERROR_NONE)
+        {
+            error = (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_ENABLE,
+                                                       JVMTI_EVENT_CLASS_PREPARE, NULL);
+        }
+        if (error != JVMTI_ERROR_NONE)
+        {
+            (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_DISABLE,
+                                               JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, NULL);
+        }
+    }
+    else
+    {
+        error = (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_DISABLE,
+                                                   JVMTI_EVENT_CLASS_PREPARE, NULL);
+        if (g_capture_class == NULL)
+        {
+            const jvmtiError file_error =
+                (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_DISABLE,
+                                                   JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, NULL);
+            if (error == JVMTI_ERROR_NONE)
+                error = file_error;
+        }
+    }
+
+    if (error == JVMTI_ERROR_NONE)
+        g_watch_events = enabled;
+    unlock_cache();
+    return error == JVMTI_ERROR_NONE;
 }
 
 bool class_cache_ensure(jclass klass, const char *class_name, jvmtiError *out_error)
@@ -268,8 +340,9 @@ bool class_cache_ensure(jclass klass, const char *class_name, jvmtiError *out_er
     if (error == JVMTI_ERROR_NONE)
     {
         error = (*jvmti)->RetransformClasses(jvmti, 1, &klass);
-        (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_DISABLE,
-                                           JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, NULL);
+        if (!g_watch_events)
+            (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_DISABLE,
+                                               JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, NULL);
     }
 
     (*env)->DeleteGlobalRef(env, g_capture_class);

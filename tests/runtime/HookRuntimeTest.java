@@ -1,3 +1,5 @@
+import java.io.InputStream;
+
 /* Drives jni2hook against a live JVM: the library is loaded into a running VM
    the way an injected library would be, so the JVMTI environment is created in
    the live phase and only gets the capabilities that phase still grants. */
@@ -35,6 +37,11 @@ public class HookRuntimeTest {
     static native int scanInClass(Class<?> target);
     static native int scanGlobally(Class<?> target);
     static native int rejectInvalidPattern(Class<?> target);
+    static native int watchLoadedPattern(Class<?> target);
+    static native int watchLatePattern();
+    static native int latePatternPending();
+    static native int hookWatchedLatePattern(Class<?> target);
+    static native int watchUnmatchedPattern();
     static native void teardown();
 
     public int compute(int a, int b) {
@@ -95,6 +102,12 @@ public class HookRuntimeTest {
         }
     }
 
+    static final class ByteLoader extends ClassLoader {
+        Class<?> define(String name, byte[] bytes) {
+            return defineClass(name, bytes, 0, bytes.length);
+        }
+    }
+
     static int failures = 0;
 
     static void check(String what, boolean condition) {
@@ -122,6 +135,34 @@ public class HookRuntimeTest {
         check("find bytecode signature in class", scanInClass(HookRuntimeTest.class) == 0);
         check("find bytecode signature across loaded classes", scanGlobally(HookRuntimeTest.class) == 0);
         check("reject malformed bytecode signature", rejectInvalidPattern(HookRuntimeTest.class) == 0);
+        check("watch resolves an already loaded class", watchLoadedPattern(HookRuntimeTest.class) == 0);
+
+        check("register unloaded-class bytecode watch", watchLatePattern() == 0);
+        check("watch is pending before class loading", latePatternPending() == 0);
+        Class<?> lateType = Class.forName("LateLoadTarget");
+        Object late = lateType.getDeclaredConstructor().newInstance();
+        java.lang.reflect.Method lateCompute = lateType.getDeclaredMethod("computeLate", int.class);
+        check("late-loaded method is original before hooking", lateCompute.invoke(late, 1), 4614);
+        check("install the method prepared during class loading",
+                hookWatchedLatePattern(lateType) == 0);
+        check("late-loaded method is overwritten", lateCompute.invoke(late, 1), 5614);
+
+        check("keep an unmatched class-load watch active", watchUnmatchedPattern() == 0);
+        byte[] lateBytes;
+        try (InputStream stream = HookRuntimeTest.class.getClassLoader()
+                .getResourceAsStream("LateLoadTarget.class")) {
+            lateBytes = stream.readAllBytes();
+        }
+        Class<?> secondLateType = new ByteLoader().define("LateLoadTarget", lateBytes);
+        java.lang.reflect.Constructor<?> secondLateConstructor =
+                secondLateType.getDeclaredConstructor();
+        secondLateConstructor.setAccessible(true);
+        Object secondLate = secondLateConstructor.newInstance();
+        java.lang.reflect.Method secondLateCompute =
+                secondLateType.getDeclaredMethod("computeLate", int.class);
+        secondLateCompute.setAccessible(true);
+        check("unrelated DefineClass works while the load hook stays active",
+                secondLateCompute.invoke(secondLate, 1), 4614);
 
         check("install compute", hookCompute(HookRuntimeTest.class) == 0);
         resetCalls();
@@ -251,5 +292,13 @@ public class HookRuntimeTest {
 
         System.out.println(failures == 0 ? "all runtime checks passed" : failures + " CHECKS FAILED");
         System.exit(failures == 0 ? 0 : 1);
+    }
+}
+
+/* Kept outside HookRuntimeTest so loading the test driver does not load this
+   target. The runtime scan must miss it first and find it after Class.forName. */
+final class LateLoadTarget {
+    public int computeLate(int value) {
+        return ((value * 13) + 37) ^ 0x1234;
     }
 }

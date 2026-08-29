@@ -1,16 +1,11 @@
 #include "bytecode_scan.h"
 
+#include "jni2hook/utils/visitors/attribute_info.h"
+
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-
-typedef struct
-{
-    unsigned char *bytes;
-    unsigned char *masks;
-    size_t length;
-} byte_pattern;
 
 static int hex_value(char value)
 {
@@ -23,15 +18,19 @@ static int hex_value(char value)
     return -1;
 }
 
-static void byte_pattern_free(byte_pattern *pattern)
+void bytecode_pattern_destroy(bytecode_pattern *pattern)
 {
+    if (pattern == NULL)
+        return;
     free(pattern->bytes);
     free(pattern->masks);
     memset(pattern, 0, sizeof(*pattern));
 }
 
-static jni2hook_status byte_pattern_parse(const char *text, byte_pattern *out)
+jni2hook_status bytecode_pattern_compile(const char *text, bytecode_pattern *out)
 {
+    if (out == NULL)
+        return JNI2HOOK_ERR_INVALID_PATTERN;
     memset(out, 0, sizeof(*out));
     if (text == NULL)
         return JNI2HOOK_ERR_INVALID_PATTERN;
@@ -56,7 +55,7 @@ static jni2hook_status byte_pattern_parse(const char *text, byte_pattern *out)
     out->masks = malloc(count);
     if (out->bytes == NULL || out->masks == NULL)
     {
-        byte_pattern_free(out);
+        bytecode_pattern_destroy(out);
         return JNI2HOOK_ERR_OUT_OF_MEMORY;
     }
 
@@ -85,7 +84,7 @@ static jni2hook_status byte_pattern_parse(const char *text, byte_pattern *out)
             const int low = length == 2 ? hex_value(begin[1]) : -1;
             if (high < 0 || low < 0)
             {
-                byte_pattern_free(out);
+                bytecode_pattern_destroy(out);
                 return JNI2HOOK_ERR_INVALID_PATTERN;
             }
             out->bytes[out->length] = (unsigned char)((high << 4) | low);
@@ -97,9 +96,9 @@ static jni2hook_status byte_pattern_parse(const char *text, byte_pattern *out)
     return JNI2HOOK_OK;
 }
 
-static const unsigned char *byte_pattern_find(const byte_pattern *pattern,
-                                              const unsigned char *bytes,
-                                              size_t length)
+static const unsigned char *bytecode_pattern_find(const bytecode_pattern *pattern,
+                                                  const unsigned char *bytes,
+                                                  size_t length)
 {
     if (bytes == NULL || length < pattern->length)
         return NULL;
@@ -122,12 +121,47 @@ static const unsigned char *byte_pattern_find(const byte_pattern *pattern,
     return NULL;
 }
 
-static bool scan_class(jvmtiEnv *jvmti,
-                       jclass target,
-                       const byte_pattern *pattern,
-                       jmethodID *out_method,
-                       uint32_t *out_offset,
-                       jni2hook_search_stats *stats)
+bool bytecode_pattern_find_in_class_file(const bytecode_pattern *pattern,
+                                         const ClassFile *class_file,
+                                         size_t *out_method_index,
+                                         uint32_t *out_offset)
+{
+    if (pattern == NULL || class_file == NULL)
+        return false;
+
+    for (u2 i = 0; i < class_file->methods.count; i++)
+    {
+        const method_info *method = &class_file->methods.items[i];
+        const attribute_info *code =
+            attribute_list_find(&method->attributes, &class_file->constant_pool, "Code");
+        if (code == NULL || code->attribute_length < 8)
+            continue;
+
+        const unsigned char *info = code->info;
+        const uint32_t length = ((uint32_t)info[4] << 24) | ((uint32_t)info[5] << 16) |
+                                ((uint32_t)info[6] << 8) | (uint32_t)info[7];
+        if ((uint64_t)length + 8u > code->attribute_length)
+            continue;
+
+        const unsigned char *match = bytecode_pattern_find(pattern, info + 8, length);
+        if (match == NULL)
+            continue;
+
+        if (out_method_index != NULL)
+            *out_method_index = i;
+        if (out_offset != NULL)
+            *out_offset = (uint32_t)(match - (info + 8));
+        return true;
+    }
+    return false;
+}
+
+static bool scan_prepared_class(jvmtiEnv *jvmti,
+                                jclass target,
+                                const bytecode_pattern *pattern,
+                                jmethodID *out_method,
+                                uint32_t *out_offset,
+                                jni2hook_search_stats *stats)
 {
     jint method_count = 0;
     jmethodID *methods = NULL;
@@ -173,7 +207,7 @@ static bool scan_class(jvmtiEnv *jvmti,
             stats->methods_scanned++;
 
         const unsigned char *match =
-            byte_pattern_find(pattern, bytecode, (size_t)bytecode_length);
+            bytecode_pattern_find(pattern, bytecode, (size_t)bytecode_length);
         if (match != NULL)
         {
             *out_method = methods[i];
@@ -188,6 +222,17 @@ static bool scan_class(jvmtiEnv *jvmti,
     return found;
 }
 
+bool bytecode_pattern_find_in_prepared_class(jvmtiEnv *jvmti, jclass target,
+                                             const bytecode_pattern *pattern,
+                                             jmethodID *out_method,
+                                             uint32_t *out_offset)
+{
+    if (jvmti == NULL || target == NULL || pattern == NULL || out_method == NULL ||
+        out_offset == NULL)
+        return false;
+    return scan_prepared_class(jvmti, target, pattern, out_method, out_offset, NULL);
+}
+
 jni2hook_status bytecode_scan_find(JNIEnv *env,
                                    jvmtiEnv *jvmti,
                                    const char *pattern_text,
@@ -196,8 +241,8 @@ jni2hook_status bytecode_scan_find(JNIEnv *env,
                                    jni2hook_search_stats *out_stats,
                                    jvmtiError *out_error)
 {
-    byte_pattern pattern;
-    jni2hook_status status = byte_pattern_parse(pattern_text, &pattern);
+    bytecode_pattern pattern;
+    jni2hook_status status = bytecode_pattern_compile(pattern_text, &pattern);
     if (status != JNI2HOOK_OK)
         return status;
 
@@ -210,7 +255,7 @@ jni2hook_status bytecode_scan_find(JNIEnv *env,
     if (error != JVMTI_ERROR_NONE)
     {
         *out_error = error;
-        byte_pattern_free(&pattern);
+        bytecode_pattern_destroy(&pattern);
         return JNI2HOOK_ERR_JVMTI;
     }
 
@@ -221,12 +266,13 @@ jni2hook_status bytecode_scan_find(JNIEnv *env,
     for (jint i = 0; i < class_count; i++)
     {
         if (!found)
-            found = scan_class(jvmti, classes[i], &pattern, out_method, out_offset, out_stats);
+            found = scan_prepared_class(jvmti, classes[i], &pattern, out_method, out_offset,
+                                        out_stats);
         (*env)->DeleteLocalRef(env, classes[i]);
     }
 
     (*jvmti)->Deallocate(jvmti, (unsigned char *)classes);
-    byte_pattern_free(&pattern);
+    bytecode_pattern_destroy(&pattern);
     return found ? JNI2HOOK_OK : JNI2HOOK_ERR_NOT_FOUND;
 }
 
@@ -238,12 +284,12 @@ jni2hook_status bytecode_scan_find_in_class(jvmtiEnv *jvmti,
                                             jvmtiError *out_error)
 {
     (void)out_error;
-    byte_pattern pattern;
-    jni2hook_status status = byte_pattern_parse(pattern_text, &pattern);
+    bytecode_pattern pattern;
+    jni2hook_status status = bytecode_pattern_compile(pattern_text, &pattern);
     if (status != JNI2HOOK_OK)
         return status;
 
-    const bool found = scan_class(jvmti, target, &pattern, out_method, out_offset, NULL);
-    byte_pattern_free(&pattern);
+    const bool found = scan_prepared_class(jvmti, target, &pattern, out_method, out_offset, NULL);
+    bytecode_pattern_destroy(&pattern);
     return found ? JNI2HOOK_OK : JNI2HOOK_ERR_NOT_FOUND;
 }

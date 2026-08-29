@@ -8,6 +8,10 @@ static jclass    g_target        = NULL;
 static jmethodID g_compute_orig  = NULL;
 static jmethodID g_greet_orig    = NULL;
 static jmethodID g_locked_orig   = NULL;
+static jclass    g_late_target   = NULL;
+static jmethodID g_late_orig     = NULL;
+static jni2hook_method_watch *g_late_watch = NULL;
+static jni2hook_method_watch *g_unmatched_watch = NULL;
 static int       g_calls         = 0;
 static int       g_insert_first  = 0;
 static int       g_insert_second = 0;
@@ -15,6 +19,8 @@ static int       g_insert_static = 0;
 static int       g_ctor_direct   = 0;
 static int       g_ctor_delegate = 0;
 static int       g_ctor_complex  = 0;
+
+static const char *g_late_pattern = "1B 10 0D 68 10 25 60 11 12 34 82 AC";
 
 static jint JNICALL detour_compute(JNIEnv *env, jobject self, jint a, jint b)
 {
@@ -42,6 +48,13 @@ static jint JNICALL detour_locked(JNIEnv *env, jobject self, jint x)
 {
     g_calls++;
     return (*env)->CallNonvirtualIntMethod(env, self, g_target, g_locked_orig, x) + 1;
+}
+
+static jint JNICALL detour_late(JNIEnv *env, jobject self, jint value)
+{
+    const jint original = (*env)->CallNonvirtualIntMethod(env, self, g_late_target,
+                                                          g_late_orig, value);
+    return original + 1000;
 }
 
 static void JNICALL detour_insert_first(JNIEnv *env, jobject self)
@@ -445,15 +458,110 @@ JNIEXPORT jint JNICALL Java_HookRuntimeTest_rejectInvalidPattern(JNIEnv *env, jc
                : -1;
 }
 
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_watchLoadedPattern(JNIEnv *env, jclass unused,
+                                                               jclass target)
+{
+    (void)unused;
+
+    static const char *pattern = "1B 06 78 08 82 10 ?? 60 10 07 68 AC";
+    jni2hook_method_watch *watch = NULL;
+    jni2hook_status status = JNI2Hook_WatchMethod(pattern, &watch);
+    if (status != JNI2HOOK_OK)
+        return (jint)status;
+
+    jmethodID method = NULL;
+    uint32_t offset = UINT32_MAX;
+    status = JNI2Hook_GetWatchedMethod(watch, &method, &offset);
+    jmethodID expected = (*env)->GetMethodID(env, target, "signatureTarget", "(I)I");
+    const bool correct = status == JNI2HOOK_OK && method == expected && offset == 0;
+    JNI2Hook_DestroyMethodWatch(watch);
+    return correct ? 0 : -1;
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_watchLatePattern(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+
+    const jni2hook_status status = JNI2Hook_WatchMethod(g_late_pattern, &g_late_watch);
+    return status == JNI2HOOK_OK ? 0 : (jint)status;
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_latePatternPending(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+
+    jmethodID found = NULL;
+    uint32_t offset = 0;
+    const jni2hook_status status =
+        JNI2Hook_GetWatchedMethod(g_late_watch, &found, &offset);
+    return status == JNI2HOOK_ERR_NOT_FOUND ? 0 : -1;
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_hookWatchedLatePattern(JNIEnv *env, jclass unused,
+                                                                   jclass target)
+{
+    (void)unused;
+
+    jmethodID method = NULL;
+    uint32_t offset = UINT32_MAX;
+    jni2hook_status status = JNI2Hook_GetWatchedMethod(g_late_watch, &method, &offset);
+    if (status != JNI2HOOK_OK || method == NULL || offset != 0)
+        return status == JNI2HOOK_OK ? -1 : (jint)status;
+
+    jmethodID expected = (*env)->GetMethodID(env, target, "computeLate", "(I)I");
+    if (expected == NULL || method != expected)
+    {
+        (*env)->ExceptionClear(env);
+        return -2;
+    }
+
+    g_late_target = (*env)->NewGlobalRef(env, target);
+    if (g_late_target == NULL)
+        return -3;
+
+    JNI2Hook_DestroyMethodWatch(g_late_watch);
+    g_late_watch = NULL;
+
+    status = JNI2Hook_Install(method, (void *)detour_late, &g_late_orig);
+    if (status != JNI2HOOK_OK)
+    {
+        (*env)->DeleteGlobalRef(env, g_late_target);
+        g_late_target = NULL;
+        return (jint)status;
+    }
+    return 0;
+}
+
+JNIEXPORT jint JNICALL Java_HookRuntimeTest_watchUnmatchedPattern(JNIEnv *env, jclass unused)
+{
+    (void)env;
+    (void)unused;
+    const jni2hook_status status =
+        JNI2Hook_WatchMethod("CA FE BA BE", &g_unmatched_watch);
+    return status == JNI2HOOK_OK ? 0 : (jint)status;
+}
+
 JNIEXPORT void JNICALL Java_HookRuntimeTest_teardown(JNIEnv *env, jclass unused)
 {
     (void)unused;
+    JNI2Hook_DestroyMethodWatch(g_late_watch);
+    g_late_watch = NULL;
     JNI2Hook_Shutdown();
+    JNI2Hook_DestroyMethodWatch(g_unmatched_watch);
+    g_unmatched_watch = NULL;
     if (g_target != NULL)
     {
         (*env)->DeleteGlobalRef(env, g_target);
         g_target = NULL;
     }
+    if (g_late_target != NULL)
+    {
+        (*env)->DeleteGlobalRef(env, g_late_target);
+        g_late_target = NULL;
+    }
+    g_late_orig = NULL;
 }
 
 static jint g_mid_calls = 0;

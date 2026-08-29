@@ -11,6 +11,7 @@ The library supports:
 - replacing a Java method with a native detour while preserving its original body;
 - inserting a `void` native callback at a bytecode offset;
 - finding methods and fields with bytecode patterns;
+- watching and parsing classes before they are loaded;
 - reading and editing class files without a running JVM.
 
 ## Requirements
@@ -108,6 +109,24 @@ jmethodID method = (*env)->GetMethodID(env, target, "tick", "()V");
 jmethodID original = NULL;
 
 status = JNI2Hook_Install(method, native_detour, &original);
+```
+
+If the target class may not exist yet, register a watch first. Its raw bytes
+are parsed in `ClassFileLoadHook`; `ClassPrepare` resolves the captured method
+before code from the class executes:
+
+```c
+jni2hook_method_watch *watch = NULL;
+JNI2Hook_WatchMethod("2A B4 ?? ?? B6 ?? ??", &watch);
+
+/* Later, after the class has been prepared. This is an O(1) readiness check,
+   not another scan through loaded classes. */
+jmethodID watched_method = NULL;
+uint32_t offset = 0;
+if (JNI2Hook_GetWatchedMethod(watch, &watched_method, &offset) == JNI2HOOK_OK) {
+    JNI2Hook_DestroyMethodWatch(watch);
+    JNI2Hook_Install(watched_method, native_detour, &original);
+}
 ```
 
 On Windows, do not call the API while the loader lock is held in `DllMain`.

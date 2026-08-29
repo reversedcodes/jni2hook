@@ -2,6 +2,7 @@
 
 #include "hook/bytecode_scan.h"
 #include "hook/class_cache.h"
+#include "hook/class_watch.h"
 #include "hook/field_scan.h"
 #include "hook/jvm.h"
 #include "hook/mutex.h"
@@ -874,6 +875,92 @@ jni2hook_status JNI2Hook_FindMethodInClass(jclass target, const char *pattern,
     return find_method(target, pattern, out_method, out_bytecode_offset, NULL);
 }
 
+jni2hook_status JNI2Hook_WatchMethod(const char *pattern,
+                                     jni2hook_method_watch **out_watch)
+{
+    if (pattern == NULL || out_watch == NULL)
+        return JNI2HOOK_ERR_INVALID_PATTERN;
+    *out_watch = NULL;
+
+    if (!lock_if_initialized())
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
+
+    JNIEnv *env = jvm_env();
+    jvmtiEnv *jvmti = jvm_jvmti();
+    jni2hook_method_watch *watch = NULL;
+    jni2hook_status result;
+    if (env == NULL)
+    {
+        result = JNI2HOOK_ERR_NO_JNI;
+        goto done;
+    }
+    if (jvmti == NULL)
+    {
+        result = JNI2HOOK_ERR_NO_JVMTI;
+        goto done;
+    }
+
+    result = class_watch_create(env, pattern, &watch);
+    if (result != JNI2HOOK_OK)
+        goto done;
+
+    /* The events are active before this snapshot. A class that races the scan
+       is therefore either found here or captured from its raw load bytes. */
+    jmethodID method = NULL;
+    uint32_t offset = 0;
+    jvmtiError error = JVMTI_ERROR_NONE;
+    result = bytecode_scan_find(env, jvmti, pattern, &method, &offset, NULL, &error);
+    if (result == JNI2HOOK_OK)
+    {
+        result = class_watch_resolve_loaded(env, jvmti, watch, method, offset);
+    }
+    else if (result == JNI2HOOK_ERR_NOT_FOUND)
+    {
+        result = JNI2HOOK_OK;
+    }
+    else
+    {
+        if (result == JNI2HOOK_ERR_JVMTI)
+            g_last_error = error;
+        class_watch_destroy(env, watch);
+        watch = NULL;
+    }
+
+    if (result == JNI2HOOK_OK)
+        *out_watch = watch;
+
+done:
+    hook_mutex_unlock(&g_lock);
+    return result;
+}
+
+jni2hook_status JNI2Hook_GetWatchedMethod(jni2hook_method_watch *watch,
+                                          jmethodID *out_method,
+                                          uint32_t *out_bytecode_offset)
+{
+    if (!lock_if_initialized())
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
+    const jni2hook_status result =
+        class_watch_get(watch, out_method, out_bytecode_offset);
+    hook_mutex_unlock(&g_lock);
+    return result;
+}
+
+void JNI2Hook_DestroyMethodWatch(jni2hook_method_watch *watch)
+{
+    if (watch == NULL)
+        return;
+
+    if (lock_if_initialized())
+    {
+        class_watch_destroy(jvm_env(), watch);
+        hook_mutex_unlock(&g_lock);
+        return;
+    }
+
+    class_watch_destroy(NULL, watch);
+}
+
 /* Removes every entry the predicate picks out and rebuilds the class from the
    cached original without them.
 
@@ -1021,6 +1108,7 @@ jni2hook_status JNI2Hook_Shutdown(void)
         vm_structs_set_bool_flag("AllowRedefinitionToAddDeleteMethods", false, NULL);
     g_flag_state = -1;
 
+    class_watch_clear(jvm_env());
     class_cache_clear();
     class_cache_stop();
     jvm_release();

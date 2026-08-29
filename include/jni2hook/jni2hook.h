@@ -54,6 +54,8 @@ typedef struct
     size_t count;
 } jni2hook_method_layout;
 
+typedef struct jni2hook_method_watch jni2hook_method_watch;
+
 const char *JNI2Hook_StatusMessage(jni2hook_status status);
 
 /* The JVMTI error behind the last JNI2HOOK_ERR_JVMTI, for diagnostics. */
@@ -119,6 +121,22 @@ jni2hook_status JNI2Hook_FindMethod(const char *pattern, jmethodID *out_method,
 
 jni2hook_status JNI2Hook_FindMethodInClass(jclass target, const char *pattern,
                                            jmethodID *out_method, uint32_t *out_bytecode_offset);
+
+/* Watches classes that have not been loaded yet. The ClassFileLoadHook parses
+ * their raw class-file bytes before the VM creates a jclass; ClassPrepare then
+ * resolves the captured method to a jmethodID before code from that class has
+ * executed. Registration also scans classes that were already loaded, closing
+ * the race between the initial scan and enabling the load events.
+ *
+ * GetWatchedMethod returns JNI2HOOK_ERR_NOT_FOUND while the watch is pending.
+ * Destroy the watch after consuming the result or when it is no longer needed.
+ */
+jni2hook_status JNI2Hook_WatchMethod(const char *pattern,
+                                     jni2hook_method_watch **out_watch);
+jni2hook_status JNI2Hook_GetWatchedMethod(jni2hook_method_watch *watch,
+                                          jmethodID *out_method,
+                                          uint32_t *out_bytecode_offset);
+void JNI2Hook_DestroyMethodWatch(jni2hook_method_watch *watch);
 
 /* Resolves a field through a bytecode signature: the pattern picks the method,
    instruction_offset steps to a field access inside it, and the constant pool

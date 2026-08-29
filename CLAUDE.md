@@ -292,9 +292,11 @@ are easy to get wrong, and all four are load-bearing:
    replaces the baseline a later retransformation starts from, so capturing again
    after a hook is installed hands back our own rewrite and the original body is
    gone for good.
-2. **Switch the hook off again immediately.** It fires for every class the VM
-   loads while enabled, on every thread, and leaving it on breaks unrelated
-   `DefineClass` calls in the process.
+2. **Switch capture-only mode off again immediately.** A method watch is the
+   deliberate exception: while unresolved watches exist, the load callback
+   stays enabled, treats initial loads separately from retransforms, parses but
+   never rewrites their bytes, and is paired with `ClassPrepare`. The runtime
+   test keeps an unmatched watch active across an unrelated `DefineClass` call.
 3. What arrives is the class **as it currently stands**, after Mixin and friends
    have had their turn — not the bytes from the jar. That is the point.
 4. **A binary name is not an identity, and the callback runs on other threads.**
@@ -305,6 +307,17 @@ are easy to get wrong, and all four are load-bearing:
    class, so the cache takes a recursive lock of its own; the thread waits there
    in native, which is why holding it across `RetransformClasses` does not stop
    the VM reaching a safepoint.
+
+### hook/class_watch.c
+
+`JNI2Hook_WatchMethod` closes the unloaded-class race in this order: compile and
+register the pattern, enable `ClassFileLoadHook` plus `ClassPrepare`, and only
+then take a snapshot of already loaded classes. An initial load is parsed from
+the raw class-file bytes and records the defining loader, internal class name,
+method name, descriptor, static flag, and bytecode offset. `ClassPrepare`
+matches both loader identity and class name and turns that record into a
+`jmethodID`. `JNI2Hook_GetWatchedMethod` only reads this prepared result; it
+never rescans the VM.
 
 `jni2hook.c` keeps a registry per class and always **rebuilds from the cached
 original**, applying every hook currently registered, rather than editing
