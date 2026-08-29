@@ -58,7 +58,7 @@ set(JNI2HOOK_INSTALL OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(jni2hook
     GIT_REPOSITORY https://github.com/reversedcodes/jni2hook.git
-    GIT_TAG 1.0
+    GIT_TAG 1.0-Beta
 )
 
 FetchContent_MakeAvailable(jni2hook)
