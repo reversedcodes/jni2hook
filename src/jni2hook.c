@@ -106,11 +106,8 @@ int JNI2Hook_ForcedRedefinitionFlag(void)
     return g_flag_state;
 }
 
-/* g_lock is created by JNI2Hook_Init, so it may only be taken once Init has
-   run at least once. g_initialized is read unlocked first for exactly that
-   reason: it is false before Init and stays true from the moment the lock
-   exists until Shutdown, and every caller re-checks it under the lock, which is
-   what actually closes the race against a concurrent Shutdown. */
+/* g_lock does not exist before Init. The second check closes the race with a
+   concurrent Shutdown after the initial unlocked read. */
 static bool lock_if_initialized(void)
 {
     if (!g_initialized)
@@ -141,9 +138,7 @@ static char *duplicate(const char *text)
     return copy;
 }
 
-/* Keyed on the class itself, not on its binary name: two loaders may each
-   define a class of that name, and picking the wrong one here would redefine a
-   class nobody asked about and bind natives into it. */
+/* Class identity includes its loader, so binary names are not unique keys. */
 static hooked_class *find_class(JNIEnv *env, jclass klass)
 {
     if (env == NULL || klass == NULL)
@@ -270,9 +265,7 @@ static void suspend_others(suspended_set *set)
     if (kept <= 0)
         return;
 
-    /* The result array is allocated here and kept for the resume. Allocating it
-       again on the way out would mean a failure at that point leaves every
-       thread this call suspended, permanently. */
+    /* Keep the result array for resume; allocation must not fail after suspend. */
     jvmtiError *results = malloc((size_t)kept * sizeof(*results));
     if (results == NULL)
         return;
@@ -282,10 +275,7 @@ static void suspend_others(suspended_set *set)
 
     (*jvmti)->SuspendThreadList(jvmti, kept, threads, results);
 
-    /* SuspendThreadList reports per thread, and only the ones it actually
-       suspended may be resumed. A thread that came back
-       JVMTI_ERROR_THREAD_SUSPENDED was already suspended by someone else and
-       resuming it would be undoing their work. */
+    /* Resume only threads suspended here, never ones another agent suspended. */
     jint suspended = 0;
     for (jint i = 0; i < kept; i++)
     {
@@ -335,9 +325,7 @@ static int compare_insert_entries(const hook_entry *left, const hook_entry *righ
     return 0;
 }
 
-/* Rebuilds the class from the bytes it had before the first hook and applies
-   every hook that is currently registered for it. Starting from the original
-   every time is what lets hooks be added and removed in any order. */
+/* Rebuilds from the cached original so hooks can change in any order. */
 static jni2hook_status reapply(hooked_class *target)
 {
     jvmtiEnv *jvmti = jvm_jvmti();
@@ -447,11 +435,8 @@ static jni2hook_status reapply(hooked_class *target)
         definition_owned = true;
     }
 
-    /* The window that has to be closed is between RedefineClasses making a
-       method native and RegisterNatives binding it, where a thread reaching it
-       would get an UnsatisfiedLinkError. With no hooks left there is nothing to
-       bind afterwards and therefore no window, so a full uninstall does not
-       stop every thread in the VM for nothing. */
+    /* Suspend across the RedefineClasses/RegisterNatives gap, when a native
+       method exists without an implementation. Restore-only has no such gap. */
     suspended_set suspended;
     if (target->count != 0)
         suspend_others(&suspended);
@@ -471,10 +456,8 @@ static jni2hook_status reapply(hooked_class *target)
     }
     else
     {
-        /* Every binding is attempted even after one fails. Stopping at the
-           first left the methods behind it native and unbound, so any thread
-           reaching one of them got an UnsatisfiedLinkError on top of whatever
-           went wrong here. The first failure is what gets reported. */
+        /* Bind every native even after a failure; otherwise later methods stay
+           native and unbound. Report the first failure. */
         for (size_t i = 0; i < target->count; i++)
         {
             hook_entry *entry = &target->hooks[i];
@@ -553,9 +536,7 @@ jni2hook_status JNI2Hook_Init(JavaVM *vm)
     memset(&available, 0, sizeof(available));
     (*jvmti)->GetPotentialCapabilities(jvmti, &available);
 
-    /* Ask only for what the VM says it can still grant in this phase. An agent
-       loaded into a running VM does not get everything an OnLoad agent would,
-       and asking for an ungrantable capability fails the whole call. */
+    /* A live-phase agent may request only capabilities still reported available. */
     jvmtiCapabilities wanted;
     memset(&wanted, 0, sizeof(wanted));
     wanted.can_redefine_classes = available.can_redefine_classes;
@@ -587,10 +568,7 @@ jni2hook_status JNI2Hook_Init(JavaVM *vm)
 
     g_can_suspend = granted.can_suspend != 0;
 
-    /* RedefineClasses will not accept the copy that carries the original body
-       unless AllowRedefinitionToAddDeleteMethods is on, and it is off by
-       default on every current JDK. Nothing supported can change a product flag
-       in a running VM, so the value is set through HotSpot's own flag table. */
+    /* Added method copies require this non-manageable HotSpot product flag. */
     {
         bool previous = false;
         if (vm_structs_set_bool_flag("AllowRedefinitionToAddDeleteMethods", true, &previous))
@@ -613,6 +591,24 @@ jni2hook_status JNI2Hook_InitFromRunningVm(void)
     JavaVM *vm = jvm_find_running();
     if (vm == NULL)
         return JNI2HOOK_ERR_NO_JVMTI;
+
+    /* HotSpot requires attachment before a native thread asks GetEnv for JVMTI. */
+    JNIEnv *env = NULL;
+    const jint env_status = (*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6);
+    if (env_status == JNI_EDETACHED)
+    {
+        JavaVMAttachArgs args;
+        args.version = JNI_VERSION_1_6;
+        args.name = "jni2hook-init";
+        args.group = NULL;
+        if ((*vm)->AttachCurrentThreadAsDaemon(vm, (void **)&env, &args) != JNI_OK)
+            return JNI2HOOK_ERR_NO_JNI;
+    }
+    else if (env_status != JNI_OK || env == NULL)
+    {
+        return JNI2HOOK_ERR_NO_JNI;
+    }
+
     return JNI2Hook_Init(vm);
 }
 
@@ -961,14 +957,8 @@ void JNI2Hook_DestroyMethodWatch(jni2hook_method_watch *watch)
     class_watch_destroy(NULL, watch);
 }
 
-/* Removes every entry the predicate picks out and rebuilds the class from the
-   cached original without them.
-
-   The entries are moved out of the way, not freed. Until RedefineClasses has
-   actually put the body back, the VM is still running the hooked class, and the
-   registry has to keep saying so: freeing first meant a failed rebuild left the
-   detour live while JNI2Hook_IsInstalled reported it gone, with nothing left to
-   retry from. */
+/* Moves matching entries aside, rebuilds, then frees them. On rebuild failure
+   the old count is restored so live detours remain tracked and retryable. */
 typedef bool (*hook_predicate)(const hook_entry *entry, const void *context);
 
 static jni2hook_status uninstall_matching(jmethodID method, hook_predicate matches,
@@ -1075,10 +1065,7 @@ jni2hook_status JNI2Hook_Shutdown(void)
     if (!lock_if_initialized())
         return JNI2HOOK_OK;
 
-    /* Every class is restored, and the first failure is remembered and handed
-       back. A caller that is about to unload the library needs to know that a
-       class it hooked is still native and still bound into code that is about
-       to be unmapped, which the old void signature could not tell it. */
+    /* Restore every class and return the first failure to the unload caller. */
     jni2hook_status result = JNI2HOOK_OK;
 
     while (g_class_count > 0)

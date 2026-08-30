@@ -61,27 +61,17 @@ const char *JNI2Hook_StatusMessage(jni2hook_status status);
 /* The JVMTI error behind the last JNI2HOOK_ERR_JVMTI, for diagnostics. */
 jvmtiError JNI2Hook_LastJvmtiError(void);
 
-/* What Init made of AllowRedefinitionToAddDeleteMethods, the flag that gates
-   every method the rewrite adds and is off by default on current JDKs:
-     1  it was off and jni2hook switched it on
-     0  it was already on, nothing to do
-    -1  the flag could not be reached, so installing a hook will fail with
-        JVMTI_ERROR_UNSUPPORTED_REDEFINITION_METHOD_ADDED
-   Worth checking right after Init, because -1 only shows up as a failed install
-   much later otherwise. */
+/* Result of handling AllowRedefinitionToAddDeleteMethods: 1 changed, 0 already
+   enabled, -1 unavailable. The last value makes installs fail with JVMTI 63. */
 int JNI2Hook_ForcedRedefinitionFlag(void);
 
 /* Binds to the VM and acquires the JVMTI capabilities. Call once. */
 jni2hook_status JNI2Hook_Init(JavaVM *vm);
 
-/* Same, but finds the JVM running in this process instead of being handed one.
-   This is what an injected library wants: it is never called by the JVM, so it
-   has no JavaVM to start from. */
+/* Finds the running JVM and attaches the calling thread before initialization. */
 jni2hook_status JNI2Hook_InitFromRunningVm(void);
 
-/* Attaches the calling thread to the VM if it is not a Java thread yet and
-   hands back its JNIEnv. Every other entry point does this for itself, so this
-   is only needed when the caller wants a JNIEnv of its own. */
+/* Returns a JNIEnv, attaching the caller as a daemon when necessary. */
 jni2hook_status JNI2Hook_Attach(JNIEnv **out_env);
 
 /* Makes method native and binds it to native_function, parking the original
@@ -91,13 +81,8 @@ jni2hook_status JNI2Hook_Attach(JNIEnv **out_env);
  * jclass for a static method or jobject for an instance method, then the
  * declared arguments.
  *
- * Note what this does not solve: after JNI2Hook_Uninstall the VM may still
- * enter native_function for a while. A JIT compiled caller reached through a
- * MethodHandle call site keeps the old target and can arrive hundreds of
- * milliseconds later. If the code behind native_function can be unmapped, for
- * instance because it lives in a library that gets unloaded, it needs a
- * trampoline that stays mapped and can be disarmed. jni2hook cannot do that for
- * the caller. */
+ * A stale JIT/MethodHandle call site may enter native_function after uninstall.
+ * Code that can be unloaded therefore needs a resident, disarmable trampoline. */
 jni2hook_status JNI2Hook_Install(jmethodID method, void *native_function, jmethodID *out_original);
 
 /* Inserts a call to native_function at bytecode_offset while leaving the
@@ -122,15 +107,11 @@ jni2hook_status JNI2Hook_FindMethod(const char *pattern, jmethodID *out_method,
 jni2hook_status JNI2Hook_FindMethodInClass(jclass target, const char *pattern,
                                            jmethodID *out_method, uint32_t *out_bytecode_offset);
 
-/* Watches classes that have not been loaded yet. The ClassFileLoadHook parses
- * their raw class-file bytes before the VM creates a jclass; ClassPrepare then
- * resolves the captured method to a jmethodID before code from that class has
- * executed. Registration also scans classes that were already loaded, closing
- * the race between the initial scan and enabling the load events.
+/* Watches loaded and future classes. Initial class bytes are parsed before a
+ * jclass exists, then ClassPrepare resolves the match to a jmethodID.
  *
  * GetWatchedMethod returns JNI2HOOK_ERR_NOT_FOUND while the watch is pending.
- * Destroy the watch after consuming the result or when it is no longer needed.
- */
+ * Destroy the watch after consuming the result or when no longer needed. */
 jni2hook_status JNI2Hook_WatchMethod(const char *pattern,
                                      jni2hook_method_watch **out_watch);
 jni2hook_status JNI2Hook_GetWatchedMethod(jni2hook_method_watch *watch,
@@ -138,10 +119,7 @@ jni2hook_status JNI2Hook_GetWatchedMethod(jni2hook_method_watch *watch,
                                           uint32_t *out_bytecode_offset);
 void JNI2Hook_DestroyMethodWatch(jni2hook_method_watch *watch);
 
-/* Resolves a field through a bytecode signature: the pattern picks the method,
-   instruction_offset steps to a field access inside it, and the constant pool
-   index of that instruction names the field. Lets an obfuscated field be found
-   by where it is used rather than by its name. */
+/* Resolves the field access at instruction_offset inside a pattern match. */
 jni2hook_status JNI2Hook_FindFieldInClass(jclass target, const char *pattern,
                                           uint32_t instruction_offset, jfieldID *out_field,
                                           int *out_is_static);
@@ -154,43 +132,20 @@ jni2hook_status JNI2Hook_ReadMethodLayout(const unsigned char *class_bytes, size
 
 void JNI2Hook_FreeMethodLayout(jni2hook_method_layout *layout);
 
-/* Puts the body back and drops any copies or inserted calls for method. Other
-   hooks on the same class stay.
- *
- * On failure nothing is dropped. The VM is still running the hooked class, so
- * the registry keeps describing it, JNI2Hook_IsInstalled keeps reporting the
- * hook, and the call can be retried. Treat a non-OK result as "the detour can
- * still be entered": a caller that would unload the library on the strength of
- * this call must not do so until it succeeds.
- *
- * Removes every hook registered for that jmethodID, which for a method carrying
- * several JNI2Hook_InstallAt callbacks means all of them. Use
- * JNI2Hook_UninstallAt to remove one of them on its own. */
+/* Restores method and removes all callbacks registered on it. Other methods in
+ * the class stay hooked. On failure the detours remain live; do not unload. */
 jni2hook_status JNI2Hook_Uninstall(jmethodID method);
 
-/* Removes the single inserted callback that JNI2Hook_InstallAt registered for
-   this method, offset and function, leaving every other hook on the method in
-   place. The three together are the identity of an inserted call, since the same
-   method may carry several at different offsets and several at the same offset
-   with different functions.
-
-   Fails the same way JNI2Hook_Uninstall does, and with the same consequence: a
-   non-OK result means the callback is still installed and can still be entered. */
+/* Removes one inserted callback identified by method, offset and function.
+   On failure the callback remains live. */
 jni2hook_status JNI2Hook_UninstallAt(jmethodID method, uint32_t bytecode_offset,
                                      void *native_function);
 
 int JNI2Hook_IsInstalled(jmethodID method);
 
-/* Removes every hook, puts AllowRedefinitionToAddDeleteMethods back the way it
-   was found, and releases the JVMTI environment.
- *
- * Returns the first failure any of the restores reported, or JNI2HOOK_OK when
- * every class went back cleanly. Everything is released either way, because the
- * library is going away, so a non-OK result means a class is still native and
- * still bound to a function pointer the caller is about to unmap. Do not unload
- * on that. Note that even JNI2HOOK_OK does not make the note on
- * JNI2Hook_Install go away: a JIT compiled caller can still arrive afterwards,
- * and only a trampoline that stays mapped solves that. */
+/* Restores every hook and the VM flag, then releases JVMTI. A non-OK result
+   means at least one detour remains live and the callback library must stay
+   mapped. JNI2HOOK_OK still does not drain stale JIT call sites. */
 jni2hook_status JNI2Hook_Shutdown(void);
 
 #ifdef __cplusplus

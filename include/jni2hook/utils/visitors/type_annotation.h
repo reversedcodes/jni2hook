@@ -3,20 +3,8 @@
 
 #include "attribute_info.h"
 
-/* RuntimeVisibleTypeAnnotations and RuntimeInvisibleTypeAnnotations are the
- * sixth structure that points into the bytecode by offset, and the only one the
- * opaque-attribute rule cannot carry unchanged through an insertion.
- *
- * JVMS 4.7.20: a type_annotation sitting on a Code attribute names a bytecode
- * position through localvar_target (a scope span), offset_target (the new,
- * instanceof, or method reference instruction it annotates) and
- * type_argument_target (the cast or invocation it annotates). Leaving those
- * alone after an insertion makes them name the wrong instruction.
- *
- * The attribute itself stays opaque. What is collected here is the byte
- * position of each offset inside the payload plus its current value, so the
- * values can travel through the same index mapping as every other reference and
- * be written straight back into the bytes afterwards. */
+/* Tracks bytecode offsets inside otherwise opaque Code type-annotation
+   attributes. Each entry records where its value lives in the raw payload. */
 
 typedef enum
 {

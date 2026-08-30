@@ -20,20 +20,15 @@ static cached_class *g_entries    = NULL;
 static size_t        g_count      = 0;
 static size_t        g_capacity   = 0;
 
-/* A global ref, not the caller's local one: the callback may run on a thread
-   that never created that local ref, where using it would be undefined. */
+/* The load callback may run on another thread, so this must be a global ref. */
 static jclass      g_capture_class = NULL;
 static const char *g_capture_name  = NULL;
 static bool        g_captured      = false;
 static bool        g_started       = false;
 static bool        g_watch_events  = false;
 
-/* The recursive mutex matters: class_cache_ensure holds it across
-   RetransformClasses, and the callback that lands inside that call runs on the
-   very same thread. Other threads loading classes at the same time block here
-   for the duration, which is what stops them from tearing the entry array while
-   it is being grown. They wait in a JVMTI callback with the thread in native,
-   so the VM can still reach a safepoint and the retransform completes. */
+/* RetransformClasses invokes the callback synchronously on this thread, so the
+   cache lock must be recursive. Other callback threads wait in native state. */
 static void lock_cache(void)
 {
     if (!g_lock_ready)
@@ -138,8 +133,7 @@ static void JNICALL on_class_file_load(jvmtiEnv *jvmti,
     (void)jvmti;
     (void)protection_domain;
 
-    /* Leave the class alone: we only listen, the rewrite goes through
-       RedefineClasses so that it also applies to already running code. */
+    /* This callback captures only; all rewriting uses RedefineClasses. */
     *new_class_data_len = 0;
     *new_class_data     = NULL;
 
@@ -150,17 +144,8 @@ static void JNICALL on_class_file_load(jvmtiEnv *jvmti,
     {
         lock_cache();
 
-        /* Both halves are needed, and each covers what the other cannot.
-         *
-         * The name alone is not an identity: two loaders may each define a class of
-         * that name, and a modded game has plenty of loaders.
-         *
-         * class_being_redefined alone is worse. A class loaded while a retransform
-         * is in flight is reported with class_being_redefined still pointing at the
-         * class being retransformed, not NULL -- java/lang/Module$ReflectionData
-         * arrives that way in the middle of retransforming a class in a named
-         * module. Matching on identity alone therefore cached a JDK class's bytes
-         * under our target and the original body was gone for good. */
+        /* Match identity and name. Nested loads during retransform can inherit
+           class_being_redefined, while names alone collide across loaders. */
         if (g_capture_class != NULL && name != NULL && g_capture_name != NULL &&
             strcmp(name, g_capture_name) == 0 &&
             (*env)->IsSameObject(env, class_being_redefined, g_capture_class) == JNI_TRUE)

@@ -3,21 +3,9 @@
 
 #include "attribute_info.h"
 
-/* StackMapTable, JVMS 4.7.4.
- *
- * The attribute stores each frame as a delta from the one before, and the delta
- * of every frame after the first is one less than the real distance. Both are
- * undone here: frames carry the absolute bytecode offset they belong to, and
- * the deltas are rebuilt on the way out. Inserting code then only means moving
- * the offsets, with no chain of deltas to patch by hand.
- *
- * Two things are easy to miss. A verification_type_info of kind Uninitialized
- * carries a bytecode offset of its own, pointing at the new instruction that
- * created the object, and that offset moves too. And a frame's encoding depends
- * on how large its delta is: a SAME_FRAME can only express a delta up to 63, so
- * a frame whose delta grows past that has to switch to the extended form. The
- * original frame type is kept so that untouched code re-emits byte for byte
- * even when javac chose a wider encoding than it had to. */
+/* Frames use absolute bytecode offsets in memory and deltas on disk. raw_tag is
+   retained for byte-identical output; Uninitialized offsets move with their new
+   instruction. */
 
 enum
 {

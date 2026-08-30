@@ -6,8 +6,7 @@
 
 #include <stdbool.h>
 
-/* Finds the JVM already running in this process. An injected library is never
-   handed one, so it has to ask libjvm, which is loaded by definition. */
+/* Finds the JVM already running in this process. */
 JavaVM *jvm_find_running(void);
 
 bool jvm_bind(JavaVM *vm);
@@ -16,15 +15,10 @@ void jvm_release(void);
 JavaVM   *jvm_vm(void);
 jvmtiEnv *jvm_jvmti(void);
 
-/* Returns a JNIEnv for the calling thread, attaching it as a daemon if it is
-   not a Java thread yet. Attaching is unconditional and never gated on a phase
-   query: on an injected library the calling thread is usually the process's
-   primordial thread, where every jvmtiEnv entry point including GetPhase fails
-   with JVMTI_ERROR_UNATTACHED_THREAD until the attach has happened. */
+/* Returns a JNIEnv, attaching the calling thread as a daemon when needed. */
 JNIEnv *jvm_env(void);
 
-/* True once the VM has reached the live phase. Attaches first, for the reason
-   above, so it is safe to call from a thread the JVM has never seen. */
+/* Attaches the caller before querying whether the VM is live. */
 bool jvm_is_live(void);
 
 /* Clears a pending Java exception and reports whether there was one. */

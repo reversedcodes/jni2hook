@@ -753,7 +753,6 @@ transform_status class_transform_insert_guarded_call(ClassFile *cf,
         code_editor_free(&editor);
         return TRANSFORM_ERR_METHOD_NOT_FOUND;
     }
-    /* The guard answers a question, so it returns a boolean rather than void. */
     callee_descriptor[strlen(callee_descriptor) - 1] = JVM_SIGNATURE_BOOLEAN;
 
     u2 methodref = 0;

@@ -19,6 +19,8 @@ typedef enum
     WATCH_CANCELLED
 } watch_state;
 
+/* Future classes move WAITING -> CAPTURED -> READY. The loaded-class snapshot
+   may resolve WAITING directly to READY; FAILED and CANCELLED are terminal. */
 struct jni2hook_method_watch
 {
     bytecode_pattern pattern;
