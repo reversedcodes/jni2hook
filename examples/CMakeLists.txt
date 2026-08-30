@@ -28,7 +28,7 @@ foreach(example midhook field lifecycle)
     target_compile_options(j2h_example_${example} PRIVATE ${JNI2HOOK_WARNINGS})
 endforeach()
 
-foreach(example void return static midhook pattern)
+foreach(example void return static midhook pattern watch)
     add_library(j2h_example_simple_${example} SHARED simple_${example}_hook.cpp)
     target_link_libraries(j2h_example_simple_${example} PRIVATE jni2hook)
     target_compile_options(j2h_example_simple_${example} PRIVATE ${JNI2HOOK_WARNINGS})
@@ -40,3 +40,4 @@ target_compile_options(j2h_example_layout PRIVATE ${JNI2HOOK_WARNINGS})
 
 configure_file(Tick.java ${CMAKE_CURRENT_BINARY_DIR}/Tick.java COPYONLY)
 configure_file(SimpleTarget.java ${CMAKE_CURRENT_BINARY_DIR}/SimpleTarget.java COPYONLY)
+configure_file(WatchExample.java ${CMAKE_CURRENT_BINARY_DIR}/WatchExample.java COPYONLY)

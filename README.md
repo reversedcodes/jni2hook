@@ -3,15 +3,14 @@
 [![CI](https://github.com/reversedcodes/jni2hook/actions/workflows/ci.yml/badge.svg)](https://github.com/reversedcodes/jni2hook/actions/workflows/ci.yml)
 
 jni2hook is a C11 library for hooking Java methods in a running HotSpot JVM.
-It rewrites class files through JVMTI and has no build-time JDK dependency. JNI,
-JVMTI, and class-file constants are vendored from OpenJDK.
+It rewrites class files through JVMTI and has no build-time JDK dependency.
 
-The library supports:
+It supports:
 
-- replacing a Java method with a native detour while preserving its original body;
-- inserting a `void` native callback at a bytecode offset;
+- replacing Java methods while keeping the original body callable;
+- inserting native callbacks at bytecode offsets;
 - finding methods and fields with bytecode patterns;
-- watching and parsing classes before they are loaded;
+- watching and parsing classes that have not been loaded yet;
 - reading and editing class files without a running JVM.
 
 ## Requirements
@@ -21,33 +20,17 @@ The library supports:
 - Linux or Windows
 - a HotSpot-based JVM at runtime
 
-The build intentionally uses the compiler's C extensions. The runtime needs
-POSIX and GNU interfaces such as `PTHREAD_MUTEX_RECURSIVE` and `RTLD_DEFAULT`.
-
 ## Build
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-```
-
-Tests are built by default when jni2hook is the top-level project. Examples are
-optional:
-
-```sh
-cmake -S . -B build -DJNI2HOOK_BUILD_EXAMPLES=ON
-cmake --build build
-```
-
-Run the registered smoke tests with:
-
-```sh
 ctest --test-dir build --output-on-failure
 ```
 
-## Use with CMake
+Build the examples with `-DJNI2HOOK_BUILD_EXAMPLES=ON`.
 
-With `FetchContent`:
+## CMake integration
 
 ```cmake
 include(FetchContent)
@@ -58,41 +41,23 @@ set(JNI2HOOK_INSTALL OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(jni2hook
     GIT_REPOSITORY https://github.com/reversedcodes/jni2hook.git
-    GIT_TAG 1.0-Beta
+    GIT_TAG 1.1-Beta
 )
-
 FetchContent_MakeAvailable(jni2hook)
+
 target_link_libraries(my_library PRIVATE jni2hook::jni2hook)
 ```
 
-## Releases
-
-As a subdirectory:
+For a local copy, replace `FetchContent` with:
 
 ```cmake
 add_subdirectory(external/jni2hook)
-target_link_libraries(my_library PRIVATE jni2hook::jni2hook)
 ```
 
-Or install and consume the package:
-
-```sh
-cmake --install build --prefix /path/to/prefix
-```
-
-```cmake
-find_package(jni2hook CONFIG REQUIRED)
-target_link_libraries(my_library PRIVATE jni2hook::jni2hook)
-```
-
-## Basic API
-
-Initialize from an injected native library, locate a method, and install a
-detour:
+## Basic hook
 
 ```c
-jni2hook_status status = JNI2Hook_InitFromRunningVm();
-if (status != JNI2HOOK_OK)
+if (JNI2Hook_InitFromRunningVm() != JNI2HOOK_OK)
     return;
 
 JNIEnv *env = NULL;
@@ -103,40 +68,43 @@ jclass target = (*env)->FindClass(env, "example/Target");
 jmethodID method = (*env)->GetMethodID(env, target, "tick", "()V");
 jmethodID original = NULL;
 
-status = JNI2Hook_Install(method, native_detour, &original);
+jni2hook_status status = JNI2Hook_Install(method, native_detour, &original);
 ```
 
-If the target class may not exist yet, register a watch first. Its raw bytes
-are parsed in `ClassFileLoadHook`; `ClassPrepare` resolves the captured method
-before code from the class executes:
+The detour must use the matching JNI signature.
+
+## Watch an unloaded class
+
+`JNI2Hook_WatchMethod` also observes future class loads. Their raw bytecode is
+parsed in `ClassFileLoadHook`, and `ClassPrepare` resolves the match to a
+`jmethodID`.
 
 ```c
 jni2hook_method_watch *watch = NULL;
-JNI2Hook_WatchMethod("2A B4 ?? ?? B6 ?? ??", &watch);
+JNI2Hook_WatchMethod("1B 06 68 10 07 60 AC", &watch);
 
-/* Later, after the class has been prepared. This is an O(1) readiness check,
-   not another scan through loaded classes. */
-jmethodID watched_method = NULL;
+/* Called once after the target class has been prepared. */
+jmethodID method = NULL;
 uint32_t offset = 0;
-if (JNI2Hook_GetWatchedMethod(watch, &watched_method, &offset) == JNI2HOOK_OK) {
+if (JNI2Hook_GetWatchedMethod(watch, &method, &offset) == JNI2HOOK_OK) {
     JNI2Hook_DestroyMethodWatch(watch);
-    JNI2Hook_Install(watched_method, native_detour, &original);
+    JNI2Hook_InstallAt(method, offset, native_callback);
 }
 ```
 
-On Windows, do not call the API while the loader lock is held in `DllMain`.
-Start an initialization thread and return from `DllMain` without waiting for it.
+This is an O(1) readiness check, not another scan through loaded classes. A
+complete example is in [`examples/simple_watch_hook.cpp`](examples/simple_watch_hook.cpp)
+and [`examples/WatchExample.java`](examples/WatchExample.java).
 
-Use `JNI2Hook_Uninstall` to restore a method and `JNI2Hook_Shutdown` before the
-library is unloaded. A detour must use the matching JNI signature. See
-[`examples/`](examples/) for replacement hooks, inserted callbacks, bytecode
-scans, field resolution, and class-file utilities.
+## Unloading
 
-## Important limitation
+Call `JNI2Hook_Uninstall` to restore a method and `JNI2Hook_Shutdown` before
+unloading the native library. On Windows, run JNI/JVMTI work on a separate
+thread instead of inside the `DllMain` loader lock.
 
-After uninstalling, JIT-compiled callers may briefly retain the old native
-target. If the detour code can be unloaded, place a permanent, disarmable
-trampoline between the JVM and the library.
+JIT-compiled callers may briefly retain an old native target after uninstall.
+If the detour code can be unloaded, use a permanent, disarmable trampoline
+between the JVM and the library.
 
 ## License
 
