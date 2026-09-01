@@ -1137,3 +1137,159 @@ jni2hook_status JNI2Hook_FindFieldInClass(jclass target, const char *pattern,
     hook_mutex_unlock(&g_lock);
     return status;
 }
+
+/* GetLoadedClasses hands back one local reference per class, and a live game
+   has tens of thousands of them, so each is released as it is examined rather
+   than left to pile up in the frame until the caller returns. */
+jni2hook_status JNI2Hook_FindLoadedClass(const char *internal_name, jclass *out_class)
+{
+    if (internal_name == NULL || out_class == NULL)
+        return JNI2HOOK_ERR_NOT_FOUND;
+
+    if (!lock_if_initialized())
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
+
+    JNIEnv *env = jvm_env();
+    jvmtiEnv *jvmti = jvm_jvmti();
+    jni2hook_status status;
+
+    if (env == NULL)
+    {
+        status = JNI2HOOK_ERR_NO_JNI;
+        goto done;
+    }
+    if (jvmti == NULL)
+    {
+        status = JNI2HOOK_ERR_NO_JVMTI;
+        goto done;
+    }
+
+    jint count = 0;
+    jclass *classes = NULL;
+    const jvmtiError error = (*jvmti)->GetLoadedClasses(jvmti, &count, &classes);
+    if (error != JVMTI_ERROR_NONE)
+    {
+        g_last_error = error;
+        status = JNI2HOOK_ERR_JVMTI;
+        goto done;
+    }
+
+    jclass found = NULL;
+    for (jint i = 0; i < count; i++)
+    {
+        if (found == NULL)
+        {
+            /* Comparing the signature rather than a name built by hand keeps
+               array and primitive classes from ever matching by accident. */
+            char *name = jvm_class_name_of(classes[i]);
+            if (name != NULL && strcmp(name, internal_name) == 0)
+                found = (*env)->NewLocalRef(env, classes[i]);
+            free(name);
+        }
+
+        (*env)->DeleteLocalRef(env, classes[i]);
+    }
+
+    (*jvmti)->Deallocate(jvmti, (unsigned char *)classes);
+
+    if (found == NULL)
+    {
+        status = JNI2HOOK_ERR_NOT_FOUND;
+        goto done;
+    }
+
+    *out_class = found;
+    status = JNI2HOOK_OK;
+
+done:
+    hook_mutex_unlock(&g_lock);
+    return status;
+}
+
+jni2hook_status JNI2Hook_GetClassLoader(jclass klass, jobject *out_loader)
+{
+    if (klass == NULL || out_loader == NULL)
+        return JNI2HOOK_ERR_NOT_FOUND;
+
+    if (!lock_if_initialized())
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
+
+    jvmtiEnv *jvmti = jvm_jvmti();
+    jni2hook_status status;
+
+    if (jvmti == NULL)
+    {
+        status = JNI2HOOK_ERR_NO_JVMTI;
+    }
+    else
+    {
+        /* A NULL loader is the bootstrap loader, which is an answer rather
+           than a failure, so it is passed straight through. */
+        jobject loader = NULL;
+        const jvmtiError error = (*jvmti)->GetClassLoader(jvmti, klass, &loader);
+        if (error != JVMTI_ERROR_NONE)
+        {
+            g_last_error = error;
+            status = JNI2HOOK_ERR_JVMTI;
+        }
+        else
+        {
+            *out_loader = loader;
+            status = JNI2HOOK_OK;
+        }
+    }
+
+    hook_mutex_unlock(&g_lock);
+    return status;
+}
+
+jni2hook_status JNI2Hook_DefineClass(jobject loader, const char *internal_name,
+                                     const unsigned char *bytes, size_t size, jclass *out_class)
+{
+    if (internal_name == NULL || bytes == NULL || size == 0 || out_class == NULL)
+        return JNI2HOOK_ERR_CLASS_FILE;
+
+    /* DefineClass takes a jsize, so anything past its range cannot be passed
+       on and is refused here instead of being truncated. */
+    if (size > (size_t)0x7FFFFFFF)
+        return JNI2HOOK_ERR_CLASS_FILE;
+
+    if (!lock_if_initialized())
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
+
+    JNIEnv *env = jvm_env();
+    jni2hook_status status;
+
+    if (env == NULL)
+    {
+        status = JNI2HOOK_ERR_NO_JNI;
+    }
+    else
+    {
+        jclass defined = (*env)->DefineClass(env, internal_name, loader, (const jbyte *)bytes,
+                                             (jsize)size);
+
+        if ((*env)->ExceptionCheck(env) == JNI_TRUE)
+        {
+            /* ClassFormatError, LinkageError and a duplicate definition all
+               arrive this way. The exception is cleared so the caller is not
+               handed a VM with one still pending. */
+            (*env)->ExceptionClear(env);
+            if (defined != NULL)
+                (*env)->DeleteLocalRef(env, defined);
+            status = JNI2HOOK_ERR_JAVA_EXCEPTION;
+        }
+        else if (defined == NULL)
+        {
+            status = JNI2HOOK_ERR_JNI;
+        }
+        else
+        {
+            *out_class = defined;
+            status = JNI2HOOK_OK;
+        }
+    }
+
+    hook_mutex_unlock(&g_lock);
+    return status;
+}

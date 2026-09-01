@@ -132,6 +132,103 @@ jni2hook_status JNI2Hook_ReadMethodLayout(const unsigned char *class_bytes, size
 
 void JNI2Hook_FreeMethodLayout(jni2hook_method_layout *layout);
 
+/* Finds a class the VM has already loaded, by JVM internal name such as
+   "net/minecraft/client/Minecraft". Walks GetLoadedClasses and compares the
+   real class signature, so a name that only a subset of loaders can see is
+   still found.
+
+   Class identity includes the defining loader: when several loaders have
+   loaded the same name, the first match wins and JNI2Hook_GetClassLoader on
+   the result tells which one it came from. out_class receives a local
+   reference the caller owns. */
+jni2hook_status JNI2Hook_FindLoadedClass(const char *internal_name, jclass *out_class);
+
+/* Reports the defining loader of klass. The bootstrap loader is NULL, which
+   is a success, not a failure. out_loader receives a local reference. */
+jni2hook_status JNI2Hook_GetClassLoader(jclass klass, jobject *out_loader);
+
+/* Defines a class from raw .class bytes held in memory: no temporary jar and
+   nothing written to disk. internal_name uses '/' separators. Passing the
+   loader of an already loaded target class is what lets the new class name
+   that target's types.
+
+   The JVM rejects a second definition of the same name in one loader, so this
+   is a define, not an upsert. out_class is only written on success. */
+jni2hook_status JNI2Hook_DefineClass(jobject loader, const char *internal_name,
+                                     const unsigned char *bytes, size_t size,
+                                     jclass *out_class);
+
+/* One compile-time class name and the name it carries at runtime, both JVM
+   internal names. */
+typedef struct
+{
+    const char *from;
+    const char *to;
+} jni2hook_class_mapping;
+
+/* One member, named as it was compiled and as it exists at runtime.
+
+   owner, name and descriptor identify the member in the input class file;
+   a NULL descriptor matches any descriptor. The runtime_ fields are each
+   optional: a NULL one leaves that part to the class mapping, so renaming
+   only a method needs nothing but runtime_name. runtime_owner moves the
+   reference to a different class, which the class mapping alone cannot do. */
+typedef struct
+{
+    const char *owner;
+    const char *name;
+    const char *descriptor;
+
+    const char *runtime_owner;
+    const char *runtime_name;
+    const char *runtime_descriptor;
+} jni2hook_member_mapping;
+
+typedef jni2hook_member_mapping jni2hook_method_mapping;
+typedef jni2hook_member_mapping jni2hook_field_mapping;
+
+/* Rewrites the symbolic references of a class file so that code compiled
+   against readable names links against the obfuscated names a running VM
+   actually has. This edits constant pool entries rather than replacing text,
+   so a name is only touched where the format says a name belongs.
+
+   Covered: CONSTANT_Class entries including array forms, this_class,
+   super_class, interfaces, the owner, name and descriptor of every Field-,
+   Method- and InterfaceMethodref, NameAndType entries reached through those
+   and through Dynamic and InvokeDynamic, and the descriptors of the class's
+   own fields and methods.
+
+   The class's own members are matched against mappings whose owner is this
+   class, its super class or one of its interfaces, so an override is renamed
+   along with the method it overrides.
+
+   A renamed reference is repointed at a newly interned entry rather than
+   having its text edited, because one Utf8 can be shared by references that
+   are not all being renamed. The old entry stays in the pool, unreferenced, so
+   the compile-time text may still be visible in the bytes even though nothing
+   links against it any more.
+
+   Debug and reflection attributes are left alone: Signature,
+   LocalVariableTable and LocalVariableTypeTable keep their compile-time
+   names. The verifier does not read them, so linking is unaffected.
+
+   out_bytes receives a buffer the caller owns and releases with
+   JNI2Hook_FreeClassBytes. The input is not retained. */
+jni2hook_status JNI2Hook_RemapClass(const unsigned char *input, size_t input_size,
+
+                                    const jni2hook_class_mapping *class_mappings,
+                                    size_t class_mapping_count,
+
+                                    const jni2hook_method_mapping *method_mappings,
+                                    size_t method_mapping_count,
+
+                                    const jni2hook_field_mapping *field_mappings,
+                                    size_t field_mapping_count,
+
+                                    unsigned char **out_bytes, size_t *out_size);
+
+void JNI2Hook_FreeClassBytes(unsigned char *bytes);
+
 /* Restores method and removes all callbacks registered on it. Other methods in
  * the class stay hooked. On failure the detours remain live; do not unload. */
 jni2hook_status JNI2Hook_Uninstall(jmethodID method);

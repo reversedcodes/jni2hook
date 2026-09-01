@@ -33,6 +33,7 @@ add_library(jni2hook STATIC
     src/class_file_parser.c
     src/class_file_writer.c
     src/class_transform.c
+    src/class_remap.c
     src/jni2hook.c
     src/hook/bytecode_scan.c
     src/hook/class_cache.c
@@ -103,6 +104,10 @@ if(JNI2HOOK_BUILD_TESTS)
     target_link_libraries(j2h_utils_api PRIVATE jni2hook)
     target_compile_options(j2h_utils_api PRIVATE ${JNI2HOOK_WARNINGS})
 
+    add_executable(j2h_class_remap tests/class_remap.c)
+    target_link_libraries(j2h_class_remap PRIVATE jni2hook)
+    target_compile_options(j2h_class_remap PRIVATE ${JNI2HOOK_WARNINGS})
+
     find_package(Java QUIET COMPONENTS Development)
     if(Java_JAVAC_EXECUTABLE)
         add_test(NAME classfile_smoke
@@ -126,6 +131,15 @@ if(JNI2HOOK_BUILD_TESTS)
         # reports as skipped rather than passed. insert_offsets needs a JDK with
         # java.lang.classfile for VerifyAll, so 24 or newer; shift_semantics
         # runs no JVM at all and works with any javac.
+        add_test(NAME class_remap
+            COMMAND ${CMAKE_COMMAND}
+                -DJAVAC=${Java_JAVAC_EXECUTABLE}
+                -DWORK=${CMAKE_CURRENT_BINARY_DIR}/class-remap
+                -DRUNTIME_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime
+                -DREMAP=$<TARGET_FILE:j2h_class_remap>
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/class_remap.cmake
+        )
+
         if(UNIX)
             add_test(NAME insert_offsets
                 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_insert_offsets.sh)
@@ -150,6 +164,12 @@ if(JNI2HOOK_BUILD_TESTS)
             set_tests_properties(shift_semantics PROPERTIES
                 SKIP_RETURN_CODE 2
                 ENVIRONMENT "TRANSFORM=$<TARGET_FILE:j2h_transform>;WORK=${CMAKE_CURRENT_BINARY_DIR}/shift-semantics")
+
+            add_test(NAME loader_api
+                COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_loader_api.sh)
+            set_tests_properties(loader_api PROPERTIES
+                SKIP_RETURN_CODE 2
+                ENVIRONMENT "LOADER_API_LIBRARY=$<TARGET_FILE:j2h_loader_api>;WORK=${CMAKE_CURRENT_BINARY_DIR}/loader-api")
         endif()
     endif()
 
@@ -170,6 +190,12 @@ if(JNI2HOOK_BUILD_TESTS)
     target_link_libraries(j2h_java_bridge PRIVATE jni2hook)
     target_include_directories(j2h_java_bridge PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_options(j2h_java_bridge PRIVATE ${JNI2HOOK_WARNINGS})
+
+    # The loader and remapper API, which needs a VM that already has the
+    # obfuscated classes loaded.
+    add_library(j2h_loader_api SHARED tests/runtime/loader_api.c)
+    target_link_libraries(j2h_loader_api PRIVATE jni2hook)
+    target_compile_options(j2h_loader_api PRIVATE ${JNI2HOOK_WARNINGS})
 
     if(WIN32)
         add_library(j2h_fake_jvm SHARED tests/windows/fake_jvm.c)
