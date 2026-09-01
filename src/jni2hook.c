@@ -1293,3 +1293,45 @@ jni2hook_status JNI2Hook_DefineClass(jobject loader, const char *internal_name,
     hook_mutex_unlock(&g_lock);
     return status;
 }
+
+jni2hook_status JNI2Hook_RedefineClass(jclass klass, const unsigned char *bytes, size_t size)
+{
+    if (klass == NULL || bytes == NULL || size == 0)
+        return JNI2HOOK_ERR_CLASS_FILE;
+
+    /* RedefineClasses counts the bytes in a jint. */
+    if (size > (size_t)0x7FFFFFFF)
+        return JNI2HOOK_ERR_CLASS_FILE;
+
+    if (!lock_if_initialized())
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
+
+    jvmtiEnv *jvmti = jvm_jvmti();
+    jni2hook_status status;
+
+    if (jvmti == NULL)
+    {
+        status = JNI2HOOK_ERR_NO_JVMTI;
+    }
+    else
+    {
+        jvmtiClassDefinition definition;
+        definition.klass = klass;
+        definition.class_byte_count = (jint)size;
+        definition.class_bytes = bytes;
+
+        const jvmtiError error = (*jvmti)->RedefineClasses(jvmti, 1, &definition);
+        if (error != JVMTI_ERROR_NONE)
+        {
+            g_last_error = error;
+            status = JNI2HOOK_ERR_JVMTI;
+        }
+        else
+        {
+            status = JNI2HOOK_OK;
+        }
+    }
+
+    hook_mutex_unlock(&g_lock);
+    return status;
+}

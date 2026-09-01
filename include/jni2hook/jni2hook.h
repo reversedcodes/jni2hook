@@ -158,6 +158,16 @@ jni2hook_status JNI2Hook_DefineClass(jobject loader, const char *internal_name,
                                      const unsigned char *bytes, size_t size,
                                      jclass *out_class);
 
+/* Replaces the bytecode of a class the VM has already loaded. The new
+   definition has to declare the same fields and methods; only their bodies
+   may differ.
+
+   This is the answer to a class that cannot be unloaded. The JVM has no way
+   to remove a named class from a live loader, so a caller that wants its code
+   gone from the process redefines it with a version whose methods do nothing.
+   The name stays, the behaviour does not. */
+jni2hook_status JNI2Hook_RedefineClass(jclass klass, const unsigned char *bytes, size_t size);
+
 /* One compile-time class name and the name it carries at runtime, both JVM
    internal names. */
 typedef struct
