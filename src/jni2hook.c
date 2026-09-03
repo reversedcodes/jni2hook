@@ -2,6 +2,7 @@
 
 #include "hook/bytecode_scan.h"
 #include "hook/class_cache.h"
+#include "hook/trampoline.h"
 #include "hook/class_watch.h"
 #include "hook/field_scan.h"
 #include "hook/jvm.h"
@@ -31,6 +32,7 @@ typedef struct
     char *signature;
     char *added_name;
     void *native_function;
+    void *trampoline;
     bool is_static;
     jmethodID original;
     uint32_t bytecode_offset;
@@ -197,6 +199,11 @@ static char *make_insert_name(void)
 
 static void free_entry(hook_entry *entry)
 {
+    /* The page stays mapped on purpose: a stale call site may still arrive
+       after the entry is gone. Disarmed it returns instead of dispatching. */
+    trampoline_disarm(entry->trampoline);
+    entry->trampoline = NULL;
+
     free(entry->name);
     free(entry->signature);
     free(entry->added_name);
@@ -465,7 +472,8 @@ static jni2hook_status reapply(hooked_class *target)
             JNINativeMethod binding;
             binding.name = entry->kind == HOOK_MAKE_NATIVE ? entry->name : entry->added_name;
             binding.signature = entry->kind == HOOK_MAKE_NATIVE ? entry->signature : "()V";
-            binding.fnPtr = entry->native_function;
+            binding.fnPtr = entry->trampoline != NULL ? entry->trampoline
+                                                     : entry->native_function;
 
             if ((*env)->RegisterNatives(env, target->klass, &binding, 1) < 0)
             {
@@ -774,6 +782,13 @@ static jni2hook_status install(jmethodID method, uint32_t bytecode_offset, void 
         entry->signature = signature;
         entry->added_name = added_name;
         entry->native_function = native_function;
+        {
+            const char *returns = entry->kind == HOOK_MAKE_NATIVE && entry->signature != NULL
+                                      ? strchr(entry->signature, ')')
+                                      : NULL;
+            entry->trampoline =
+                trampoline_create(native_function, returns != NULL ? returns[1] : 'V');
+        }
         entry->is_static = (modifiers & JVM_ACC_STATIC) != 0;
         entry->bytecode_offset = bytecode_offset;
         entry->kind = kind;

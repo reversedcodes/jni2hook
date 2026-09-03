@@ -350,8 +350,13 @@ in the current phase; asking for an ungrantable one fails the entire
 
 After `JNI2Hook_Uninstall` the VM may still enter the detour for a while — a JIT
 compiled caller reached through a MethodHandle call site keeps the old target.
-Anyone who unloads the library needs a trampoline that stays mapped and can be
-disarmed. This is documented in the public header and is not a bug to fix here.
+`hook/trampoline.c` closes that window: `RegisterNatives` binds a page that is
+never unmapped, uninstall disarms it, and a late call returns a zero of the
+method's return type. The page is leaked on purpose, one per hook.
+
+This is the only architecture dependent code in the library. `trampoline_create`
+returns NULL where no emitter exists, the caller's function is then bound
+directly, and unloading carries the old risk. x86-64 is emitted today.
 
 What the library *does* now tell its caller is whether the restore happened at
 all. A non-OK result from `JNI2Hook_Uninstall` or `JNI2Hook_Shutdown` means a

@@ -40,6 +40,7 @@ add_library(jni2hook STATIC
     src/hook/class_watch.c
     src/hook/field_scan.c
     src/hook/jvm.c
+    src/hook/trampoline.c
     src/hook/vm_structs.c
     src/visitors/attribute_info.c
     src/visitors/class_file.c

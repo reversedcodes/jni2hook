@@ -81,8 +81,14 @@ jni2hook_status JNI2Hook_Attach(JNIEnv **out_env);
  * jclass for a static method or jobject for an instance method, then the
  * declared arguments.
  *
- * A stale JIT/MethodHandle call site may enter native_function after uninstall.
- * Code that can be unloaded therefore needs a resident, disarmable trampoline. */
+ * A stale JIT/MethodHandle call site may enter the detour after uninstall. The
+ * VM is therefore bound to a resident trampoline rather than to native_function
+ * itself: its page is never unmapped, and uninstall disarms it so a late call
+ * returns a zero of the method's return type instead of reaching a function
+ * that may be gone. A caller may unload itself once uninstall reports OK.
+ *
+ * The emitter exists for x86-64 only. Elsewhere native_function is bound
+ * directly, and a caller that unloads itself carries the risk described above. */
 jni2hook_status JNI2Hook_Install(jmethodID method, void *native_function, jmethodID *out_original);
 
 /* Inserts a call to native_function at bytecode_offset while leaving the
