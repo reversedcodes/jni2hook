@@ -120,6 +120,17 @@ jni2hook_status JNI2Hook_FindMethodInClass(jclass target, const char *pattern,
  * Destroy the watch after consuming the result or when no longer needed. */
 jni2hook_status JNI2Hook_WatchMethod(const char *pattern,
                                      jni2hook_method_watch **out_watch);
+
+/* Same, for a caller that already knows the names — from a mapping, say — and
+   has no reason to scan bytecode. Only ClassPrepare can resolve this: the class
+   name is compared there and the member looked up by name and descriptor.
+ *
+ * A class that is already loaded is not found by this; use
+ * JNI2Hook_FindLoadedClass for that case and watch only what is still missing. */
+jni2hook_status JNI2Hook_WatchMethodByName(const char *internal_class_name,
+                                           const char *method_name,
+                                           const char *method_signature, int method_static,
+                                           jni2hook_method_watch **out_watch);
 jni2hook_status JNI2Hook_GetWatchedMethod(jni2hook_method_watch *watch,
                                           jmethodID *out_method,
                                           uint32_t *out_bytecode_offset);

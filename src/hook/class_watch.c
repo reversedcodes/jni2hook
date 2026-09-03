@@ -38,6 +38,11 @@ struct jni2hook_method_watch
     jmethodID method;
     uint32_t offset;
 
+    /* Set when the caller already knows the names, so no pattern is compiled
+       and ClassFileLoadHook has nothing to look for. ClassPrepare then matches
+       on the class name alone. */
+    bool by_name;
+
     bool registered;
     struct jni2hook_method_watch *next;
 };
@@ -123,6 +128,55 @@ static void fail_watch(JNIEnv *env, jni2hook_method_watch *watch, jni2hook_statu
     release_ready(env, watch);
     watch->failure = failure;
     watch->state = WATCH_FAILED;
+}
+
+jni2hook_status class_watch_create_named(JNIEnv *env, const char *internal_class_name,
+                                          const char *method_name, const char *method_signature,
+                                          bool method_static,
+                                          jni2hook_method_watch **out_watch)
+{
+    if (env == NULL || out_watch == NULL || internal_class_name == NULL ||
+        method_name == NULL || method_signature == NULL)
+        return JNI2HOOK_ERR_NOT_FOUND;
+    *out_watch = NULL;
+
+    jni2hook_method_watch *watch = calloc(1, sizeof(*watch));
+    if (watch == NULL)
+        return JNI2HOOK_ERR_OUT_OF_MEMORY;
+
+    watch->by_name = true;
+    watch->class_name = duplicate_text(internal_class_name);
+    watch->method_name = duplicate_text(method_name);
+    watch->method_signature = duplicate_text(method_signature);
+    watch->method_static = method_static;
+    watch->state = WATCH_WAITING;
+    watch->failure = JNI2HOOK_OK;
+
+    if (watch->class_name == NULL || watch->method_name == NULL ||
+        watch->method_signature == NULL)
+    {
+        free(watch->class_name);
+        free(watch->method_name);
+        free(watch->method_signature);
+        free(watch);
+        return JNI2HOOK_ERR_OUT_OF_MEMORY;
+    }
+
+    lock_watches();
+    watch->next = g_watches;
+    watch->registered = true;
+    g_watches = watch;
+
+    if (!class_cache_set_watch_events(true))
+    {
+        unlock_watches();
+        class_watch_destroy(env, watch);
+        return JNI2HOOK_ERR_JVMTI;
+    }
+
+    unlock_watches();
+    *out_watch = watch;
+    return JNI2HOOK_OK;
 }
 
 jni2hook_status class_watch_create(JNIEnv *env, const char *pattern,
@@ -271,6 +325,10 @@ void class_watch_on_class_file_load(JNIEnv *env, jobject loader, jint class_data
     bool waiting = false;
     for (jni2hook_method_watch *watch = g_watches; watch != NULL; watch = watch->next)
     {
+        /* A name based watch has no pattern to look for in the class bytes. */
+        if (watch->by_name)
+            continue;
+
         if (watch->state == WATCH_WAITING)
         {
             waiting = true;
@@ -346,9 +404,32 @@ void class_watch_on_class_prepare(jvmtiEnv *jvmti, JNIEnv *env, jclass klass)
 
         jmethodID method = NULL;
         uint32_t offset = 0;
-        if (!bytecode_pattern_find_in_prepared_class(jvmti, klass, &watch->pattern,
-                                                     &method, &offset))
+
+        if (watch->by_name)
+        {
+            char *prepared = jvm_class_name_of(klass);
+            const bool same = prepared != NULL && watch->class_name != NULL &&
+                              strcmp(prepared, watch->class_name) == 0;
+            free(prepared);
+            if (!same)
+                continue;
+
+            method = watch->method_static
+                         ? (*env)->GetStaticMethodID(env, klass, watch->method_name,
+                                                     watch->method_signature)
+                         : (*env)->GetMethodID(env, klass, watch->method_name,
+                                               watch->method_signature);
+            if (method == NULL)
+            {
+                jvm_clear_exception(env);
+                continue;
+            }
+        }
+        else if (!bytecode_pattern_find_in_prepared_class(jvmti, klass, &watch->pattern,
+                                                          &method, &offset))
+        {
             continue;
+        }
 
         jclass owned = (*env)->NewGlobalRef(env, klass);
         if (owned == NULL)

@@ -3,8 +3,14 @@
 
 #include "jni2hook/jni2hook.h"
 
+#include <stdbool.h>
+
 jni2hook_status class_watch_create(JNIEnv *env, const char *pattern,
                                     jni2hook_method_watch **out_watch);
+jni2hook_status class_watch_create_named(JNIEnv *env, const char *internal_class_name,
+                                          const char *method_name, const char *method_signature,
+                                          bool method_static,
+                                          jni2hook_method_watch **out_watch);
 jni2hook_status class_watch_get(jni2hook_method_watch *watch, jmethodID *out_method,
                                  uint32_t *out_offset);
 void class_watch_destroy(JNIEnv *env, jni2hook_method_watch *watch);

@@ -945,6 +945,37 @@ done:
     return result;
 }
 
+jni2hook_status JNI2Hook_WatchMethodByName(const char *internal_class_name,
+                                           const char *method_name,
+                                           const char *method_signature, int method_static,
+                                           jni2hook_method_watch **out_watch)
+{
+    if (internal_class_name == NULL || method_name == NULL || method_signature == NULL ||
+        out_watch == NULL)
+        return JNI2HOOK_ERR_NOT_FOUND;
+    *out_watch = NULL;
+
+    if (!lock_if_initialized())
+        return JNI2HOOK_ERR_NOT_INITIALIZED;
+
+    JNIEnv *env = jvm_env();
+    jni2hook_status result;
+    if (env == NULL)
+    {
+        result = JNI2HOOK_ERR_NO_JNI;
+    }
+    else
+    {
+        /* Nothing to scan: only ClassPrepare can turn a name into a jmethodID,
+           so an already loaded class is deliberately not resolved here. */
+        result = class_watch_create_named(env, internal_class_name, method_name,
+                                          method_signature, method_static != 0, out_watch);
+    }
+
+    hook_mutex_unlock(&g_lock);
+    return result;
+}
+
 jni2hook_status JNI2Hook_GetWatchedMethod(jni2hook_method_watch *watch,
                                           jmethodID *out_method,
                                           uint32_t *out_bytecode_offset)
